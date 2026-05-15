@@ -1,0 +1,38 @@
+[workspace]
+members = [
+  "apps/desktop",
+  "crates/core",
+  "crates/ui",
+  "crates/services",
+  "crates/plugin-bridge",
+  "crates/package-manager",
+  "crates/syntax",
+  "crates/search",
+  "crates/platform",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+authors = ["Perry"]
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+eframe = "0.33"
+egui = "0.33"
+rfd = "0.15"
+needle-core = { path = "crates/core" }
+needle-ui = { path = "crates/ui" }
+needle-services = { path = "crates/services" }
+needle-plugin-bridge = { path = "crates/plugin-bridge" }
+needle-package-manager = { path = "crates/package-manager" }
+needle-syntax = { path = "crates/syntax" }
+needle-search = { path = "crates/search" }
+needle-platform = { path = "crates/platform" }

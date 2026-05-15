@@ -1,0 +1,15 @@
+[package]
+name = "needle-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+eframe.workspace = true
+egui.workspace = true
+rfd.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+needle-core.workspace = true

@@ -1,0 +1,15 @@
+target/
+Cargo.lock
+.DS_Store
+.idea/
+.vscode/
+*.log
+.env
+node_modules/
+__pycache__/
+.pytest_cache/
+.venv/
+*.pyc
+coverage/
+dist/
+build/
