@@ -5,6 +5,15 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Git ref to build from (branch, commit, or tag)'
+        required: true
+        default: 'main'
+      release_tag:
+        description: 'Release tag to publish assets to'
+        required: true
+        default: 'v0.2.0'
 
 permissions:
   contents: write
@@ -28,6 +37,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref }}
 
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
@@ -40,12 +51,12 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/needle-desktop.exe" "dist/needle-desktop.exe"
-          Copy-Item "scripts/windows-install.ps1" "dist/install.ps1"
-          Copy-Item "scripts/windows-uninstall.ps1" "dist/uninstall.ps1"
-          Copy-Item "README.md" "dist/README.md"
-          Compress-Archive -Path dist/* -DestinationPath "${{ matrix.artifact_name }}"
+          New-Item -ItemType Directory -Force -Path dist/package | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/needle-desktop.exe" "dist/package/needle-desktop.exe"
+          Copy-Item "scripts/windows-install.ps1" "dist/package/install.ps1"
+          Copy-Item "scripts/windows-uninstall.ps1" "dist/package/uninstall.ps1"
+          Copy-Item "README.md" "dist/package/README.md"
+          Compress-Archive -Path dist/package/* -DestinationPath "dist/${{ matrix.artifact_name }}"
 
       - name: Package macOS artifact
         if: matrix.kind == 'macos'
@@ -89,13 +100,15 @@ jobs:
           cp scripts/macos-install.sh "$PKG_ROOT/install.sh"
           cp scripts/macos-uninstall.sh "$PKG_ROOT/uninstall.sh"
           chmod +x "$PKG_ROOT/install.sh" "$PKG_ROOT/uninstall.sh"
-          ditto -c -k --sequesterRsrc --keepParent "$PKG_ROOT" "${{ matrix.artifact_name }}"
+          ditto -c -k --sequesterRsrc --keepParent "$PKG_ROOT" "dist/${{ matrix.artifact_name }}"
+          ls -lah dist
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.kind }}-release
-          path: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.artifact_name }}
+          if-no-files-found: error
 
   release:
     needs: build
@@ -104,6 +117,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref }}
 
       - name: Download packaged artifacts
         uses: actions/download-artifact@v4
@@ -117,6 +132,7 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
           body_path: RELEASE_NOTES.md
           files: |
             release-assets/windows-release/*.zip
