@@ -68,8 +68,11 @@ jobs:
           mkdir -p "$APP_ROOT/Contents/MacOS" "$APP_ROOT/Contents/Resources" "$PKG_ROOT"
           cp "target/${{ matrix.target }}/release/needle-desktop" "$APP_ROOT/Contents/MacOS/needle-desktop"
           chmod +x "$APP_ROOT/Contents/MacOS/needle-desktop"
-          cat > "$APP_ROOT/Contents/Info.plist" <<'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
+          python3 - <<'PY'
+          from pathlib import Path
+
+          plist = Path('dist/Needle Editor.app/Contents/Info.plist')
+          plist.write_text('''<?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
@@ -95,6 +98,8 @@ jobs:
             <true/>
           </dict>
           </plist>
+          ''', encoding='utf-8')
+          PY
           cp -R "$APP_ROOT" "$PKG_ROOT/Needle Editor.app"
           cp README.md "$PKG_ROOT/README.md"
           cp scripts/macos-install.sh "$PKG_ROOT/install.sh"
