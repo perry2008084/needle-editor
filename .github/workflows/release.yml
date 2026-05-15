@@ -100,6 +100,7 @@ jobs:
           cp scripts/macos-install.sh "$PKG_ROOT/install.sh"
           cp scripts/macos-uninstall.sh "$PKG_ROOT/uninstall.sh"
           chmod +x "$PKG_ROOT/install.sh" "$PKG_ROOT/uninstall.sh"
+          tar -czf "$RUNNER_TEMP/macos-package.tar.gz" -C dist package
 
       - name: Upload Windows artifact
         if: matrix.kind == 'windows'
@@ -114,7 +115,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: macos-release
-          path: dist/package
+          path: ${{ runner.temp }}/macos-package.tar.gz
           if-no-files-found: error
 
   release:
@@ -135,6 +136,7 @@ jobs:
       - name: Prepare release assets
         run: |
           cp docs/RELEASE_NOTES_v0.2.md RELEASE_NOTES.md
+          tar -xzf release-assets/macos-release/macos-package.tar.gz -C release-assets/macos-release
           (
             cd release-assets/macos-release
             zip -r ../../needle-desktop-macos-aarch64.zip package
