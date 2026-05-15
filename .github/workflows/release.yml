@@ -100,21 +100,6 @@ jobs:
           cp scripts/macos-install.sh "$PKG_ROOT/install.sh"
           cp scripts/macos-uninstall.sh "$PKG_ROOT/uninstall.sh"
           chmod +x "$PKG_ROOT/install.sh" "$PKG_ROOT/uninstall.sh"
-          rm -f "${{ matrix.artifact_name }}"
-          python3 - <<'PY'
-          from pathlib import Path
-          import zipfile
-
-          root = Path('dist/package')
-          output = Path('needle-desktop-macos-aarch64.zip')
-          if not root.exists():
-              raise SystemExit(f'missing package directory: {root}')
-          with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
-              for path in root.rglob('*'):
-                  zf.write(path, path.relative_to(root.parent))
-          print(output.resolve())
-          print(output.stat().st_size)
-          PY
 
       - name: Upload Windows artifact
         if: matrix.kind == 'windows'
@@ -129,7 +114,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: macos-release
-          path: ${{ matrix.artifact_name }}
+          path: dist/package
           if-no-files-found: error
 
   release:
@@ -147,9 +132,13 @@ jobs:
         with:
           path: release-assets
 
-      - name: Prepare release notes
+      - name: Prepare release assets
         run: |
           cp docs/RELEASE_NOTES_v0.2.md RELEASE_NOTES.md
+          (
+            cd release-assets/macos-release
+            zip -r ../../needle-desktop-macos-aarch64.zip package
+          )
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -158,6 +147,6 @@ jobs:
           body_path: RELEASE_NOTES.md
           files: |
             release-assets/windows-release/*.zip
-            release-assets/macos-release/*.zip
+            needle-desktop-macos-aarch64.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
