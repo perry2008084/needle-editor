@@ -101,11 +101,20 @@ jobs:
           cp scripts/macos-uninstall.sh "$PKG_ROOT/uninstall.sh"
           chmod +x "$PKG_ROOT/install.sh" "$PKG_ROOT/uninstall.sh"
           rm -f "${{ matrix.artifact_name }}"
-          (
-            cd dist
-            /usr/bin/zip -r "../${{ matrix.artifact_name }}" package
-          )
-          ls -lah .
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile
+
+          root = Path('dist/package')
+          output = Path('needle-desktop-macos-aarch64.zip')
+          if not root.exists():
+              raise SystemExit(f'missing package directory: {root}')
+          with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+              for path in root.rglob('*'):
+                  zf.write(path, path.relative_to(root.parent))
+          print(output.resolve())
+          print(output.stat().st_size)
+          PY
 
       - name: Upload Windows artifact
         if: matrix.kind == 'windows'
