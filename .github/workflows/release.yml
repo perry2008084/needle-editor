@@ -100,14 +100,20 @@ jobs:
           cp scripts/macos-install.sh "$PKG_ROOT/install.sh"
           cp scripts/macos-uninstall.sh "$PKG_ROOT/uninstall.sh"
           chmod +x "$PKG_ROOT/install.sh" "$PKG_ROOT/uninstall.sh"
-          ditto -c -k --sequesterRsrc --keepParent "$PKG_ROOT" "dist/${{ matrix.artifact_name }}"
-          ls -lah dist
+          rm -f "${{ matrix.artifact_name }}"
+          (
+            cd dist
+            /usr/bin/zip -r "../${{ matrix.artifact_name }}" package
+          )
+          ls -lah .
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.kind }}-release
-          path: dist/${{ matrix.artifact_name }}
+          path: |
+            dist/${{ matrix.artifact_name }}
+            ${{ matrix.artifact_name }}
           if-no-files-found: error
 
   release:
