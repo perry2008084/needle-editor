@@ -7,9 +7,12 @@ authors.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+arboard = "3"
 eframe.workspace = true
 egui.workspace = true
 rfd.workspace = true
+notify.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 needle-core.workspace = true

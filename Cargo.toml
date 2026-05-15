@@ -15,7 +15,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Perry"]
 
 [workspace.dependencies]
@@ -28,6 +28,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 eframe = "0.33"
 egui = "0.33"
 rfd = "0.15"
+notify = "6"
 needle-core = { path = "crates/core" }
 needle-ui = { path = "crates/ui" }
 needle-services = { path = "crates/services" }

@@ -173,6 +173,63 @@ impl NeedleApp {
         );
 
         self.register_builtin(
+            CommandSpec::new("move_up", "Move the active caret(s) up"),
+            std::sync::Arc::new(|state, _invocation| {
+                let moved = state.move_caret_up().map_err(map_buffer_error)?;
+                Ok(CommandOutput::ok(format!("moved {} selection(s) up", moved)))
+            }),
+        );
+
+        self.register_builtin(
+            CommandSpec::new("move_down", "Move the active caret(s) down"),
+            std::sync::Arc::new(|state, _invocation| {
+                let moved = state.move_caret_down().map_err(map_buffer_error)?;
+                Ok(CommandOutput::ok(format!("moved {} selection(s) down", moved)))
+            }),
+        );
+
+        self.register_builtin(
+            CommandSpec::new("select_line", "Select the current line(s)"),
+            std::sync::Arc::new(|state, _invocation| {
+                let selected = state.select_current_lines().map_err(map_buffer_error)?;
+                Ok(CommandOutput::ok(format!("selected {} line(s)", selected)))
+            }),
+        );
+
+        self.register_builtin(
+            CommandSpec::new("duplicate_line", "Duplicate the current line(s)"),
+            std::sync::Arc::new(|state, _invocation| {
+                let duplicated = state.duplicate_current_lines().map_err(map_buffer_error)?;
+                Ok(CommandOutput::ok(format!(
+                    "duplicated {} line selection(s)",
+                    duplicated
+                )))
+            }),
+        );
+
+        self.register_builtin(
+            CommandSpec::new("delete_to_beginning_of_line", "Delete to the beginning of line"),
+            std::sync::Arc::new(|state, _invocation| {
+                let deleted = state.delete_to_beginning_of_line().map_err(map_buffer_error)?;
+                Ok(CommandOutput::ok(format!(
+                    "deleted to line start for {} selection(s)",
+                    deleted
+                )))
+            }),
+        );
+
+        self.register_builtin(
+            CommandSpec::new("delete_to_end_of_line", "Delete to the end of line"),
+            std::sync::Arc::new(|state, _invocation| {
+                let deleted = state.delete_to_end_of_line().map_err(map_buffer_error)?;
+                Ok(CommandOutput::ok(format!(
+                    "deleted to line end for {} selection(s)",
+                    deleted
+                )))
+            }),
+        );
+
+        self.register_builtin(
             CommandSpec::new("insert_line_after", "Insert a new line after the current line(s)"),
             std::sync::Arc::new(|state, invocation| {
                 let text = invocation
@@ -201,6 +258,43 @@ impl NeedleApp {
                     "inserted line before for {} selection(s)",
                     inserted
                 )))
+            }),
+        );
+
+        self.register_builtin(
+            CommandSpec::new("move_lines_up", "Move selected line(s) up"),
+            std::sync::Arc::new(|state, _invocation| {
+                let moved = state.move_selected_lines_up().map_err(map_buffer_error)?;
+                Ok(CommandOutput::ok(format!("moved {} line block(s) up", moved)))
+            }),
+        );
+
+        self.register_builtin(
+            CommandSpec::new("move_lines_down", "Move selected line(s) down"),
+            std::sync::Arc::new(|state, _invocation| {
+                let moved = state.move_selected_lines_down().map_err(map_buffer_error)?;
+                Ok(CommandOutput::ok(format!("moved {} line block(s) down", moved)))
+            }),
+        );
+
+        self.register_builtin(
+            CommandSpec::new("split_selection_into_lines", "Split current selection into line carets"),
+            std::sync::Arc::new(|state, _invocation| {
+                let split = state.split_selection_into_lines().map_err(map_buffer_error)?;
+                Ok(CommandOutput::ok(format!("split into {} caret(s)", split)))
+            }),
+        );
+
+        self.register_builtin(
+            CommandSpec::new("goto_line", "Move cursor to a 1-based line number"),
+            std::sync::Arc::new(|state, invocation| {
+                let line = invocation
+                    .args
+                    .get("line")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| CommandError::MissingArgument("line".into()))? as usize;
+                let moved = state.goto_line(line).map_err(map_buffer_error)?;
+                Ok(CommandOutput::ok(format!("moved {} caret(s) to line {line}", moved)))
             }),
         );
 

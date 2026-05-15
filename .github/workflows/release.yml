@@ -1,0 +1,125 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: needle-desktop-windows-x86_64.zip
+            kind: windows
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: needle-desktop-macos-aarch64.zip
+            kind: macos
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release -p needle-desktop --target ${{ matrix.target }}
+
+      - name: Package Windows artifact
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/needle-desktop.exe" "dist/needle-desktop.exe"
+          Copy-Item "scripts/windows-install.ps1" "dist/install.ps1"
+          Copy-Item "scripts/windows-uninstall.ps1" "dist/uninstall.ps1"
+          Copy-Item "README.md" "dist/README.md"
+          Compress-Archive -Path dist/* -DestinationPath "${{ matrix.artifact_name }}"
+
+      - name: Package macOS artifact
+        if: matrix.kind == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_ROOT="dist/Needle Editor.app"
+          PKG_ROOT="dist/package"
+          mkdir -p "$APP_ROOT/Contents/MacOS" "$APP_ROOT/Contents/Resources" "$PKG_ROOT"
+          cp "target/${{ matrix.target }}/release/needle-desktop" "$APP_ROOT/Contents/MacOS/needle-desktop"
+          chmod +x "$APP_ROOT/Contents/MacOS/needle-desktop"
+          cat > "$APP_ROOT/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key>
+            <string>en</string>
+            <key>CFBundleExecutable</key>
+            <string>needle-desktop</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.perry2008084.needle-editor</string>
+            <key>CFBundleInfoDictionaryVersion</key>
+            <string>6.0</string>
+            <key>CFBundleName</key>
+            <string>Needle Editor</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>0.2.0</string>
+            <key>CFBundleVersion</key>
+            <string>0.2.0</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>12.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          cp -R "$APP_ROOT" "$PKG_ROOT/Needle Editor.app"
+          cp README.md "$PKG_ROOT/README.md"
+          cp scripts/macos-install.sh "$PKG_ROOT/install.sh"
+          cp scripts/macos-uninstall.sh "$PKG_ROOT/uninstall.sh"
+          chmod +x "$PKG_ROOT/install.sh" "$PKG_ROOT/uninstall.sh"
+          ditto -c -k --sequesterRsrc --keepParent "$PKG_ROOT" "${{ matrix.artifact_name }}"
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.kind }}-release
+          path: ${{ matrix.artifact_name }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Prepare release notes
+        run: |
+          cp docs/RELEASE_NOTES_v0.2.md RELEASE_NOTES.md
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          files: |
+            release-assets/windows-release/*.zip
+            release-assets/macos-release/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

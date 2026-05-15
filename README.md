@@ -51,9 +51,12 @@ Project Needle 希望继承这种精神，并在现代 Rust 工程体系下重�
 - 一批基础编辑命令：
   - 插入文本
   - 前删 / 后删
-  - 左右移动
+  - 删除到行首 / 行尾
+  - 左右 / 上下移动
   - 行首 / 行尾移动
   - `select_all`
+  - `select_line`
+  - `duplicate_line`
   - 插入前/后空行
 - 基于 **egui / eframe** 的桌面 GUI MVP
 - 文件操作：
@@ -61,6 +64,19 @@ Project Needle 希望继承这种精神，并在现代 Rust 工程体系下重�
   - 打开
   - 保存
   - 另存为
+- 基础交互：
+  - 多标签页（基础版）
+  - 标签关闭 dirty 提示（基础版）
+  - Open Folder + Sidebar（基础版）
+  - Recent Projects（基础版）
+  - Quick Open（增强基础版：模糊匹配 + 项目索引缓存）
+  - Find in Project（增强基础版）
+  - Command Palette（基础版）
+  - Find / Replace（基础版）
+  - Goto Line（基础版）
+  - Copy / Cut / Paste
+  - 项目级 settings / keymap 热重载（基础版）
+  - 常用快捷键（基础版）
 - 状态栏信息：
   - 修改状态
   - 光标行列
@@ -68,8 +84,9 @@ Project Needle 希望继承这种精神，并在现代 Rust 工程体系下重�
 
 ### 当前还没完成
 - 更细粒度的编辑同步
-- 上下移动、按行复制/移动等更多编辑命令
-- 项目视图 / 文件树 / 搜索
+- 更完整的设置系统（全局配置 / 校验 / UI）
+- 项目视图 / 文件树 / 搜索增强
+  - 当前已具备项目索引缓存 / watcher + 轮询回退 刷新基础版
 - 语法高亮
 - plugin_host 与 Sublime API 兼容层
 - 插件生态接入
@@ -96,6 +113,7 @@ MVP 重点包括：
 - `docs/DEVELOPMENT_PLAN.md`
 - `docs/API_COMPATIBILITY.md`
 - `docs/TASK_BREAKDOWN.md`
+- `docs/PROJECT_SETTINGS.md`
 
 ---
 
@@ -114,9 +132,12 @@ Project Needle 当前采用分层设计：
 ### UI
 负责桌面界面与交互：
 - 顶部工具栏
+- Sidebar / 文件树
+- Quick Open
 - 文本编辑区
 - 状态栏
 - 文件打开/保存流程
+- 项目级 settings / keymap 热重载（基础版）
 
 ### Plugin Host（预留）
 未来会引入独立 Python 插件宿主，用于：
@@ -136,6 +157,7 @@ Project Needle 当前采用分层设计：
 - **Language:** Rust
 - **Desktop GUI:** egui / eframe
 - **File Dialog:** rfd
+- **File Watcher:** notify
 - **Logging:** tracing
 - **Future Plugin Runtime:** Python plugin_host（规划中）
 
@@ -218,9 +240,21 @@ cargo run -p needle-desktop
 - 编辑文本
 - 保存 / 另存为
 - Undo / Redo
-- Select All
+- Copy / Cut / Paste
+- Select All / Select Line
+- Split selection into lines
+- 左右 / 上下移动
 - 行首 / 行尾移动
-- 插入前后空行
+- Duplicate Line
+- Move Lines Up / Down
+- Find / Replace（基础版）
+- Goto Line（基础版）
+- Open Folder + Sidebar（基础版）
+- Recent Projects（基础版）
+- Quick Open（增强基础版，模糊匹配 + 项目索引缓存）
+- Find in Project（增强基础版，支持缓存与大小写选项）
+- Command Palette（基础版）
+- 多标签页切换与关闭 dirty 提示（基础版）
 - 查看状态栏信息
 
 当前 GUI 编辑同步还是 MVP 级实现，适合验证链路，不适合拿它挑战几十万行巨型文件然后骂它 😄
@@ -230,14 +264,14 @@ cargo run -p needle-desktop
 ## Roadmap
 
 ### Near Term
-- 补齐基础编辑命令：
-  - `move_up`
-  - `move_down`
-  - `select_line`
-  - `duplicate_line`
-- 增加快捷键支持
 - 改进 GUI 与核心之间的编辑同步策略
 - 引入更好的文本 diff / patch 方式
+- 设置系统增强（全局配置 / 校验 / UI）
+- 文件树 / Recent Projects / Quick Open / 项目模型增强
+- 文件系统监听 / 索引刷新机制继续增强（当前已有 watcher + 轮询回退 基础版）
+- 项目搜索能力增强与后台化
+- 查找结果高亮与更完整导航
+- 当前文件搜索与项目搜索
 
 ### Mid Term
 - 文件树 / 项目视图

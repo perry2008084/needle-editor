@@ -2,27 +2,43 @@
 
 ## 1. 本次停点说明
 
-本次停止原因：**已完成一个可编译、具备基础可用性的桌面 MVP**。
+本次停止原因：**沿当前 `egui::TextEdit` 路线已经把“单文件可用”推进到了“基础项目可用”，继续往下会进入新的优先级分叉。**
 
-当前状态不再是“纯文档 + 内核骨架”，而是已经具备：
+当前状态已经不只是“可编译的桌面 MVP”，而是具备：
 
 - Rust workspace 与项目结构
 - 核心编辑内核（Buffer / View / Selection / Command Bus / AppState）
-- 基础编辑命令
 - transaction-based undo/redo
+- 一批基础且可日常使用的编辑命令
 - 基于 egui/eframe 的桌面 GUI 外壳
-- 打开/保存/另存为/新建文件
+- 新建 / 打开 / 保存 / 另存为
+- 多标签页基础能力
+- 命令面板（Command Palette）基础版
+- Open Folder + Sidebar 基础版
+- Recent Projects 基础版
+- Quick Open 增强基础版（模糊匹配 + 项目索引缓存）
+- Find in Project 增强基础版（结果缓存 / 大小写选项）
+- 项目文件系统 watcher 基础版
+- 项目索引轮询回退刷新基础版
+- 当前文件查找 / 替换基础版
+- Goto Line 基础版
+- 剪贴板 Copy / Cut / Paste 基础链路
+- 行级编辑命令（split / move lines / duplicate line）
+- 项目级 settings / keymap 热重载基础版
+- 关闭标签时的 dirty 保护提示
 - 文本编辑与状态栏展示
 
-继续往下做将进入 **MVP 之后的增强阶段**，包括：
-- 更细粒度文本同步
-- 更强的光标/选择语义
-- 更完整的编辑命令
-- 插件宿主接入
-- 语法高亮与项目视图增强
+继续往下做会进入一个新的优先级分叉：
+- **继续补项目工作流**（更强搜索、最近项目、项目状态）
+- 或 **回头补编辑底层手感**（细粒度同步、高亮、多光标交互）
 
-因此此处适合作为一版阶段性交付点。
+这个分叉会直接影响后续节奏：
+- Quick Open 是否升级成更成熟的模糊搜索服务
+- 当前 watcher + 轮询回退 是否升级成更完整的文件系统同步机制
+- 设置系统是先做全局配置还是先做搜索后台化
+- 是否开始为更复杂编辑语义准备更可控的编辑表面
 
+因此当前适合作为一个新的干净停点。
 ---
 
 ## 2. 当前已完成内容
@@ -49,6 +65,7 @@
 - `docs/DEVELOPMENT_PLAN.md`
 - `docs/API_COMPATIBILITY.md`
 - `docs/TASK_BREAKDOWN.md`
+- `docs/PROJECT_SETTINGS.md`
 - `docs/HANDOFF_2026-05-15_MVP.md`
 
 ---
@@ -90,13 +107,23 @@
 - `insert_text`
 - `delete_backward`
 - `delete_forward`
+- `delete_to_beginning_of_line`
+- `delete_to_end_of_line`
 - `move_left`
 - `move_right`
+- `move_up`
+- `move_down`
 - `move_to_beginning_of_line`
 - `move_to_end_of_line`
 - `insert_line_after`
 - `insert_line_before`
 - `select_all`
+- `select_line`
+- `split_selection_into_lines`
+- `duplicate_line`
+- `move_lines_up`
+- `move_lines_down`
+- `goto_line`
 - `undo`
 - `redo`
 - `buffer_info`
@@ -125,14 +152,32 @@
 ### 已完成功能
 - 新建文件
 - 打开本地文本文件
+- Open Folder
 - 保存
 - 另存为
 - 多行文本编辑
 - undo / redo
+- Copy / Cut / Paste（基础剪贴板链路）
 - select all
 - 左右移动
+- 上下移动
 - 行首 / 行尾移动
+- 选整行 / split selection into lines / 复制行
+- 移动当前行块（上/下）
+- 删除到行首 / 删除到行尾
 - 向上/向下插入空行（按钮触发）
+- Command Palette 基础版
+- Sidebar 文件树基础版
+- Recent Projects 基础版
+- Quick Open 增强基础版（模糊匹配 + 项目索引缓存）
+- Find in Project 增强基础版
+- 项目文件系统 watcher 基础版
+- 项目索引轮询回退刷新基础版
+- 当前文件 Find / Replace 基础版
+- Goto Line 基础版
+- 多标签页基础切换
+- 项目级 settings / keymap 热重载基础版
+- 关闭标签 dirty 提示（基础版）
 - 状态栏显示：
   - 修改状态
   - 光标行列
@@ -157,7 +202,7 @@ cargo test -p needle-core
 ```
 
 结果：
-- 12 个测试全部通过
+- 16 个测试全部通过
 
 覆盖内容包括：
 - buffer 替换
@@ -168,8 +213,14 @@ cargo test -p needle-core
 - region caret 语义
 - undo/redo 回环
 - delete backward / forward
+- delete to beginning/end of line
 - line before / after
 - line boundary movement
+- move up / down
+- select line / duplicate line
+- split selection into lines
+- move selected lines up / down
+- goto line
 - 多 selection 替换
 
 ---
@@ -220,25 +271,23 @@ GUI 文本区目前采用的是**整缓冲替换同步**：
 ## 4.2 GUI 与核心 selection 同步仍是 MVP 级
 当前已做：
 - 从 egui cursor range 同步 selection
+- 用 egui TextEdit state 做基础程序化选区跳转
+- 为查找/替换做了基础选区定位
 
 但还不够完整：
 - 多光标 GUI 交互尚未真正打通
 - 复杂 selection 扩展语义未实现
-- 上下移动与列保持逻辑尚未实现
+- 上下移动暂未保留 preferred column
+- 选区高亮、查找结果高亮仍比较原始
 
 ---
 
-## 4.3 缺少这些典型编辑命令
+## 4.3 仍缺少这些典型编辑命令
 建议下一阶段优先补：
-- `move_up`
-- `move_down`
-- `duplicate_line`
-- `select_line`
-- `split_selection_into_lines`
-- `move_lines_up`
-- `move_lines_down`
-- `delete_to_beginning_of_line`
-- `delete_to_end_of_line`
+- 更完整的查找结果导航命令
+- 更细粒度的 replace 语义
+- 多光标相关的 GUI 交互命令
+- 更丰富的编辑/选择扩展命令
 
 ---
 
@@ -262,16 +311,46 @@ GUI 文本区目前采用的是**整缓冲替换同步**：
 
 ## 5. 推荐的下一步路线（按优先级）
 
-## 路线 A：补全编辑体验（推荐先做）
+## 路线 A：先做一个架构决策（必须先想清楚）
+目标：决定编辑器下一阶段是继续快速叠功能，还是开始为长期能力换底层。
+
+### 需要决策的问题
+是否继续基于 **egui TextEdit + 整缓冲同步** 推进下一个阶段？
+
+### 选项 1：继续在当前方案上迭代
+优点：
+- 开发速度快
+- 还能继续补不少功能
+- 适合快速验证产品路径
+
+缺点：
+- 多光标 / 高亮 / 查找结果高亮会越来越别扭
+- 细粒度编辑事件和插件语义会越来越难对齐
+- 后续可能产生二次返工
+
+### 选项 2：开始投入更可控的编辑表面
+优点：
+- 为多光标、语法高亮、查找高亮、插件语义打更稳的基础
+- 未来更容易走向长期可维护架构
+
+缺点：
+- 短期开发速度会明显下降
+- 会延后一些“立刻可见”的功能
+
+### 当前建议
+如果目标是 **尽快让自己日常试用**：先选 **选项 1**。  
+如果目标是 **尽快走向 Sublime 兼容和长期演进**：尽早准备 **选项 2**。
+
+## 路线 B：继续补日常编辑体验（如果先不重构）
 目标：让桌面 MVP 更像一个真正可日常试用的编辑器。
 
 优先级建议：
-1. `move_up / move_down`
-2. `select_line`
-3. `duplicate_line`
-4. `delete_to_beginning_of_line / delete_to_end_of_line`
-5. 更细粒度的 text diff 应用
-6. GUI 快捷键（Ctrl/Cmd+S, Z, Y, A）
+1. 更细粒度的 text diff 应用
+2. GUI 快捷键自定义 / keymap
+3. 设置文件 / 热加载
+4. 文件夹 / 项目打开
+5. Sidebar 文件树
+6. 当前文件查找结果高亮 / 导航增强
 
 ---
 
@@ -362,10 +441,15 @@ cargo run -p needle-desktop
 
 ### 如果目标是继续打磨 MVP：
 1. 先在有桌面环境的机器上运行 `needle-desktop`
-2. 人工验证打开/编辑/保存/撤销/重做
-3. 补 `move_up / move_down / duplicate_line / select_line`
-4. 加快捷键
-5. 改进编辑同步粒度
+2. 人工验证：
+   - tabs 切换 / 关闭 dirty 提示
+   - command palette
+   - copy/cut/paste
+   - find / replace / goto line
+   - move lines up/down
+3. 在当前路线下优先改进编辑同步粒度
+4. 再补设置文件 / keymap
+5. 再推进文件夹 / 项目工作流
 
 ### 如果目标是推进插件兼容：
 1. 建 JSON-RPC schema
@@ -378,12 +462,13 @@ cargo run -p needle-desktop
 ## 8. 本次完成度结论
 
 ### 结论
-**Project Needle 已完成一个“可编译、带 GUI、具备基础文件编辑能力”的 MVP。**
+**Project Needle 已完成一个“可编译、带 GUI、具备基础文件编辑能力，并开始具备日常编辑交互”的 MVP。**
 
 ### 仍需注意
 - 当前尚未在本机图形环境里完成最终人工运行验证
 - 当前 GUI 编辑同步仍偏粗
 - 当前还不具备插件兼容能力
+- 当前下一个真正的分叉点，已经从“是否继续沿用 TextEdit”转向“是否先补配置/项目模型，还是先攻克更细粒度编辑同步”
 
 ### 但这版已经足够作为：
 - 第一阶段交付物
