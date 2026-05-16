@@ -15,7 +15,7 @@ use encoding_rs::{Encoding, UTF_16BE, UTF_16LE};
 use needle_core::{BufferError, CommandSpec, NeedleApp, Region, ViewId};
 use needle_search::{
     ProjectFileEntry, ProjectIndex, ProjectSearchMatch, ProjectTextSearchEvent,
-    ProjectTextSearchQuery,
+    ProjectTextSearchHandle, ProjectTextSearchQuery,
 };
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
@@ -56,7 +56,7 @@ impl Default for ResolvedSettings {
 }
 
 struct ProjectSearchTask {
-    receiver: Receiver<ProjectTextSearchEvent>,
+    handle: ProjectTextSearchHandle,
     scanned_files: usize,
     total_matches: usize,
 }
@@ -552,13 +552,20 @@ impl NeedleEditorApp {
             .unwrap_or(0)
     }
 
+    fn cancel_current_project_search(&mut self, status: impl Into<String>) {
+        if let Some(task) = self.project_search_task.take() {
+            task.handle.cancel();
+        }
+        self.project_search_status = status.into();
+    }
+
     fn poll_project_search_task(&mut self) {
         let mut next_status = None;
         let mut clear_task = false;
 
         if let Some(task) = self.project_search_task.as_mut() {
             loop {
-                match task.receiver.try_recv() {
+                match task.handle.receiver.try_recv() {
                     Ok(ProjectTextSearchEvent::Batch(batch)) => {
                         task.scanned_files = batch.scanned_files;
                         task.total_matches = batch.total_matches;
@@ -606,8 +613,7 @@ impl NeedleEditorApp {
     fn refresh_project_index_if_needed(&mut self, force: bool, announce: bool) {
         let Some(root) = self.project_root.as_deref() else {
             self.project_index = None;
-            self.project_search_task = None;
-            self.project_search_status = "Idle".to_string();
+            self.cancel_current_project_search("Idle");
             self.cached_project_search_results.clear();
             self.last_project_scan = None;
             self.project_watcher = None;
@@ -640,11 +646,13 @@ impl NeedleEditorApp {
         self.project_index = Some(new_index);
 
         if force || changed {
-            self.project_search_task = None;
-            self.cached_project_search_generation = 0;
-            if self.project_search_query.trim().is_empty() {
-                self.project_search_status = "Idle".to_string();
+            self.cancel_current_project_search(if self.project_search_query.trim().is_empty() {
+                "Idle"
             } else {
+                "Search cancelled: index changed"
+            });
+            self.cached_project_search_generation = 0;
+            if !self.project_search_query.trim().is_empty() {
                 self.project_search_status = "Search ready to refresh…".to_string();
             }
             if announce {
@@ -713,8 +721,7 @@ impl NeedleEditorApp {
             self.cached_project_search_query.clear();
             self.cached_project_search_generation = generation;
             self.cached_project_search_case_sensitive = self.project_search_case_sensitive;
-            self.project_search_task = None;
-            self.project_search_status = "Idle".to_string();
+            self.cancel_current_project_search("Idle");
             return;
         }
 
@@ -725,10 +732,7 @@ impl NeedleEditorApp {
             return;
         }
 
-        let Some(index) = self.project_index.as_ref() else {
-            return;
-        };
-
+        self.cancel_current_project_search("Search cancelled: superseded by new query");
         self.cached_project_search_query = query.clone();
         self.cached_project_search_case_sensitive = self.project_search_case_sensitive;
         self.cached_project_search_generation = generation;
@@ -739,8 +743,16 @@ impl NeedleEditorApp {
         search_query.limit = 200;
         search_query.batch_size = 24;
 
+        let Some(handle) = self
+            .project_index
+            .as_ref()
+            .map(|index| index.spawn_text_search(search_query))
+        else {
+            return;
+        };
+
         self.project_search_task = Some(ProjectSearchTask {
-            receiver: index.spawn_text_search(search_query),
+            handle,
             scanned_files: 0,
             total_matches: 0,
         });
@@ -919,8 +931,7 @@ impl NeedleEditorApp {
         self.project_search_query.clear();
         self.cached_project_search_query.clear();
         self.cached_project_search_results.clear();
-        self.project_search_task = None;
-        self.project_search_status = "Idle".to_string();
+        self.cancel_current_project_search("Idle");
         self.expanded_dirs.clear();
         self.expanded_dirs.insert(path.clone(), true);
         self.push_recent_project(path.clone());
@@ -1824,7 +1835,14 @@ impl NeedleEditorApp {
                         .hint_text("Type text to search in project…"),
                 );
                 response.request_focus();
-                ui.checkbox(&mut self.project_search_case_sensitive, "Case sensitive");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.project_search_case_sensitive, "Case sensitive");
+                    if self.project_search_task.is_some()
+                        && ui.button("Cancel Search").clicked()
+                    {
+                        self.cancel_current_project_search("Search cancelled by user");
+                    }
+                });
                 ui.label(&self.project_search_status);
 
                 let first_result = results.first().cloned();

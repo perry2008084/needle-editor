@@ -1,7 +1,11 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver},
+        Arc,
+    },
     thread,
     time::SystemTime,
 };
@@ -106,23 +110,26 @@ impl ProjectIndex {
         run_text_search(
             self.files.iter().map(|file| file.entry.clone()).collect(),
             query,
+            || false,
             |_, _| true,
         )
         .0
     }
 
-    pub fn spawn_text_search(
-        &self,
-        query: ProjectTextSearchQuery,
-    ) -> Receiver<ProjectTextSearchEvent> {
+    pub fn spawn_text_search(&self, query: ProjectTextSearchQuery) -> ProjectTextSearchHandle {
         let files = self
             .files
             .iter()
             .map(|file| file.entry.clone())
             .collect::<Vec<_>>();
         let (tx, rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+
         thread::spawn(move || {
-            let (_, summary) = run_text_search(files, query, |batch, is_complete| {
+            let (_, summary) = run_text_search(files, query, || {
+                worker_cancelled.load(Ordering::Relaxed)
+            }, |batch, is_complete| {
                 let event = if is_complete {
                     ProjectTextSearchEvent::Complete(ProjectTextSearchSummary {
                         scanned_files: batch.scanned_files,
@@ -135,7 +142,28 @@ impl ProjectIndex {
             });
             let _ = summary;
         });
-        rx
+
+        ProjectTextSearchHandle {
+            receiver: rx,
+            cancelled,
+        }
+    }
+}
+
+pub struct ProjectTextSearchHandle {
+    pub receiver: Receiver<ProjectTextSearchEvent>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl ProjectTextSearchHandle {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for ProjectTextSearchHandle {
+    fn drop(&mut self) {
+        self.cancel();
     }
 }
 
@@ -189,12 +217,14 @@ pub struct ProjectTextSearchSummary {
     pub total_matches: usize,
 }
 
-fn run_text_search<F>(
+fn run_text_search<C, F>(
     files: Vec<ProjectFileEntry>,
     query: ProjectTextSearchQuery,
+    mut is_cancelled: C,
     mut on_progress: F,
 ) -> (Vec<ProjectSearchMatch>, ProjectTextSearchSummary)
 where
+    C: FnMut() -> bool,
     F: FnMut(ProjectTextSearchBatch, bool) -> bool,
 {
     let mut all_matches = Vec::new();
@@ -231,8 +261,8 @@ where
 
     let mut batch = Vec::new();
     for entry in files {
-        if summary.total_matches >= limit {
-            break;
+        if is_cancelled() || summary.total_matches >= limit {
+            return (all_matches, summary);
         }
 
         summary.scanned_files += 1;
@@ -241,6 +271,10 @@ where
         };
 
         for (index, line) in text.lines().enumerate() {
+            if is_cancelled() {
+                return (all_matches, summary);
+            }
+
             let matched = if query.case_sensitive {
                 line.contains(&needle)
             } else {
@@ -279,6 +313,10 @@ where
         }
     }
 
+    if is_cancelled() {
+        return (all_matches, summary);
+    }
+
     if !batch.is_empty()
         && !on_progress(
             ProjectTextSearchBatch {
@@ -289,6 +327,10 @@ where
             false,
         )
     {
+        return (all_matches, summary);
+    }
+
+    if is_cancelled() {
         return (all_matches, summary);
     }
 
@@ -549,9 +591,10 @@ mod tests {
         let index = ProjectIndex::build(&project.root, false);
         let mut query = ProjectTextSearchQuery::new("alpha");
         query.batch_size = 1;
-        let rx = index.spawn_text_search(query);
+        let handle = index.spawn_text_search(query);
 
-        let first = rx
+        let first = handle
+            .receiver
             .recv_timeout(Duration::from_secs(2))
             .expect("first event");
         match first {
@@ -562,7 +605,8 @@ mod tests {
             other => panic!("expected batch, got {other:?}"),
         }
 
-        let second = rx
+        let second = handle
+            .receiver
             .recv_timeout(Duration::from_secs(2))
             .expect("second event");
         match second {
@@ -573,7 +617,8 @@ mod tests {
             other => panic!("expected second batch, got {other:?}"),
         }
 
-        let final_event = rx
+        let final_event = handle
+            .receiver
             .recv_timeout(Duration::from_secs(2))
             .expect("complete event");
         match final_event {
@@ -585,8 +630,47 @@ mod tests {
         }
 
         assert!(matches!(
-            rx.try_recv(),
+            handle.receiver.try_recv(),
             Err(TryRecvError::Empty | TryRecvError::Disconnected)
         ));
+    }
+
+    #[test]
+    fn cancelled_async_search_stops_without_completion() {
+        let project = TempProject::new();
+        for index in 0..200 {
+            project.write(&format!("src/file_{index}.rs"), "alpha\nalpha\nalpha\n");
+        }
+
+        let index = ProjectIndex::build(&project.root, false);
+        let mut query = ProjectTextSearchQuery::new("alpha");
+        query.batch_size = 1;
+        query.limit = 10_000;
+        let handle = index.spawn_text_search(query);
+
+        let _ = handle
+            .receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first batch before cancel");
+        handle.cancel();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match handle.receiver.recv_timeout(Duration::from_millis(50)) {
+                Ok(ProjectTextSearchEvent::Batch(_)) => continue,
+                Ok(ProjectTextSearchEvent::Complete(_)) => {
+                    panic!("cancelled search should not emit completion")
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    if std::time::Instant::now() < deadline =>
+                {
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("cancelled search should disconnect promptly")
+                }
+            }
+        }
     }
 }
