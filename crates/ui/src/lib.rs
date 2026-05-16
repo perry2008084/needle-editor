@@ -213,23 +213,28 @@ impl NeedleEditorApp {
     }
 
     fn apply_editor_text_to_core(&mut self) {
-        let (buffer_id, current_len) = match self.core.state().active_buffer_id() {
+        let (buffer_id, previous_text) = match self.core.state().active_buffer_id() {
             Some(buffer_id) => {
-                let len = self
+                let text = self
                     .core
                     .state()
                     .buffer(buffer_id)
-                    .map(|buffer| buffer.len())
-                    .unwrap_or(0);
-                (buffer_id, len)
+                    .map(|buffer| buffer.content().to_string())
+                    .unwrap_or_default();
+                (buffer_id, text)
             }
             None => return,
+        };
+
+        let Some((range, replacement)) = compute_minimal_text_edit(&previous_text, &self.editor_text)
+        else {
+            return;
         };
 
         match self
             .core
             .state_mut()
-            .apply_edit(buffer_id, 0..current_len, &self.editor_text)
+            .apply_edit(buffer_id, range, replacement)
         {
             Ok(_) => {
                 if let Some(buffer) = self.core.state().buffer(buffer_id) {
@@ -1813,6 +1818,46 @@ impl App for NeedleEditorApp {
     }
 }
 
+fn shared_prefix_len(old: &str, new: &str) -> usize {
+    let mut prefix = 0;
+    for (old_ch, new_ch) in old.chars().zip(new.chars()) {
+        if old_ch != new_ch {
+            break;
+        }
+        prefix += old_ch.len_utf8();
+    }
+    prefix
+}
+
+fn shared_suffix_len(old: &str, new: &str) -> usize {
+    let mut suffix = 0;
+    for (old_ch, new_ch) in old.chars().rev().zip(new.chars().rev()) {
+        if suffix + old_ch.len_utf8() > old.len() || suffix + new_ch.len_utf8() > new.len() {
+            break;
+        }
+        if old_ch != new_ch {
+            break;
+        }
+        suffix += old_ch.len_utf8();
+    }
+    suffix
+}
+
+fn compute_minimal_text_edit<'a>(old: &str, new: &'a str) -> Option<(std::ops::Range<usize>, &'a str)> {
+    if old == new {
+        return None;
+    }
+
+    let prefix = shared_prefix_len(old, new);
+    let old_remaining = &old[prefix..];
+    let new_remaining = &new[prefix..];
+    let suffix = shared_suffix_len(old_remaining, new_remaining);
+
+    let old_end = old.len() - suffix;
+    let new_end = new.len() - suffix;
+    Some((prefix..old_end, &new[prefix..new_end]))
+}
+
 fn char_index_to_byte_index(text: &str, char_index: usize) -> usize {
     text.char_indices()
         .nth(char_index)
@@ -2063,8 +2108,34 @@ fn decode_text_bytes(bytes: &[u8]) -> DecodedTextFile {
 }
 
 #[cfg(test)]
-mod encoding_tests {
-    use super::{decode_text_bytes, TextFileEncoding};
+mod tests {
+    use super::{compute_minimal_text_edit, decode_text_bytes, TextFileEncoding};
+
+    #[test]
+    fn computes_minimal_text_edit_for_insertion() {
+        let (range, replacement) = compute_minimal_text_edit("hello world", "hello brave world").unwrap();
+        assert_eq!(range, 6..6);
+        assert_eq!(replacement, "brave ");
+    }
+
+    #[test]
+    fn computes_minimal_text_edit_for_deletion() {
+        let (range, replacement) = compute_minimal_text_edit("hello brave world", "hello world").unwrap();
+        assert_eq!(range, 6..12);
+        assert_eq!(replacement, "");
+    }
+
+    #[test]
+    fn computes_minimal_text_edit_for_replacement_with_utf8() {
+        let (range, replacement) = compute_minimal_text_edit("你好，世界", "你好，Rust").unwrap();
+        assert_eq!(range, "你好，".len().."你好，世界".len());
+        assert_eq!(replacement, "Rust");
+    }
+
+    #[test]
+    fn returns_none_when_text_is_unchanged() {
+        assert!(compute_minimal_text_edit("same", "same").is_none());
+    }
 
     #[test]
     fn decodes_utf8_text() {
