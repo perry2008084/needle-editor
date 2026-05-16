@@ -13,7 +13,7 @@ on:
       release_tag:
         description: 'Release tag to publish assets to'
         required: true
-        default: 'v0.2.0'
+        default: 'v0.3.0'
 
 permissions:
   contents: write
@@ -89,9 +89,9 @@ jobs:
             <key>CFBundlePackageType</key>
             <string>APPL</string>
             <key>CFBundleShortVersionString</key>
-            <string>0.2.0</string>
+            <string>0.3.0</string>
             <key>CFBundleVersion</key>
-            <string>0.2.0</string>
+            <string>0.3.0</string>
             <key>LSMinimumSystemVersion</key>
             <string>12.0</string>
             <key>NSHighResolutionCapable</key>
@@ -140,7 +140,7 @@ jobs:
 
       - name: Prepare release assets
         run: |
-          cp docs/RELEASE_NOTES_v0.2.md RELEASE_NOTES.md
+          cp docs/RELEASE_NOTES_v0.3.md RELEASE_NOTES.md
           tar -xzf release-assets/macos-release/macos-package.tar.gz -C release-assets/macos-release
           (
             cd release-assets/macos-release

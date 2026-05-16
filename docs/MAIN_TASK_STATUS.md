@@ -12,7 +12,7 @@
 文档基于以下内容整理：
 - `docs/DEVELOPMENT_PLAN.md`
 - `docs/TASK_BREAKDOWN.md`
-- `docs/RELEASE_NOTES_v0.2.md`
+- `docs/RELEASE_NOTES_v0.3.md`
 - 当前仓库代码状态
 
 ---

@@ -83,11 +83,10 @@ Project Needle 希望继承这种精神，并在现代 Rust 工程体系下重�
   - 字符数
 
 ### 当前还没完成
-- 更细粒度的编辑同步
-- 更完整的设置系统（全局配置 / 校验 / UI）
-- 项目视图 / 文件树 / 搜索增强
-  - 当前已具备项目索引缓存 / watcher + 轮询回退 刷新基础版
+- 更完整的设置系统（设置 UI / 更强 schema / 更细广播）
+- 更完整的项目模型 / Sidebar 状态装饰 / 持久化
 - 语法高亮
+- 大文件与性能工程
 - plugin_host 与 Sublime API 兼容层
 - 插件生态接入
 
@@ -251,27 +250,26 @@ cargo run -p needle-desktop
 - Goto Line（基础版）
 - Open Folder + Sidebar（基础版）
 - Recent Projects（基础版）
-- Quick Open（增强基础版，模糊匹配 + 项目索引缓存）
-- Find in Project（增强基础版，支持缓存与大小写选项）
+- Quick Open（已改接搜索模块）
+- Find in Project（后台任务化 + 批次结果 + 取消机制）
 - Command Palette（基础版）
 - 多标签页切换与关闭 dirty 提示（基础版）
+- 用户级 settings / keymap（基础版）
+- 当前文件 Find / Replace 匹配高亮
 - 查看状态栏信息
 
-当前 GUI 编辑同步还是 MVP 级实现，适合验证链路，不适合拿它挑战几十万行巨型文件然后骂它 😄
+当前版本已经比早期 MVP 更适合认真试用，但仍不建议拿它直接挑战超大文件或成熟编辑器级复杂工作流 😄
 
 ---
 
 ## Roadmap
 
 ### Near Term
-- 改进 GUI 与核心之间的编辑同步策略
-- 引入更好的文本 diff / patch 方式
-- 设置系统增强（全局配置 / 校验 / UI）
-- 文件树 / Recent Projects / Quick Open / 项目模型增强
-- 文件系统监听 / 索引刷新机制继续增强（当前已有 watcher + 轮询回退 基础版）
-- 项目搜索能力增强与后台化
-- 查找结果高亮与更完整导航
-- 当前文件搜索与项目搜索
+- 语法高亮基础版
+- 项目模型 / Sidebar 增强
+- 文件系统监听 / 索引刷新机制继续增强
+- 大文件与性能验证第一轮
+- 设置系统继续增强（设置 UI / 更强校验）
 
 ### Mid Term
 - 文件树 / 项目视图
