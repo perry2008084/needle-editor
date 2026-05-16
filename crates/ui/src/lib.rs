@@ -282,6 +282,165 @@ impl NeedleEditorApp {
         self.show_command_palette = false;
     }
 
+    fn render_top_menu_bar(&mut self, ui: &mut egui::Ui) {
+        egui::MenuBar::new().ui(ui, |ui| {
+            ui.menu_button("File", |ui| {
+                if ui.button("New").clicked() {
+                    self.new_file();
+                    ui.close();
+                }
+                if ui.button("Open").clicked() {
+                    self.open_file_dialog();
+                    ui.close();
+                }
+                if ui.button("Open Folder").clicked() {
+                    self.open_folder_dialog();
+                    ui.close();
+                }
+                if ui.button("Recent Projects").clicked() {
+                    self.show_recent_projects_panel = true;
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Save").clicked() {
+                    self.save_active_file();
+                    ui.close();
+                }
+                if ui.button("Save As").clicked() {
+                    self.save_active_file_as();
+                    ui.close();
+                }
+                if ui.button("Close").clicked() {
+                    if let Some(view_id) = self.core.state().active_view_id() {
+                        self.request_close_view(view_id);
+                    }
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("Edit", |ui| {
+                if ui.button("Undo").clicked() {
+                    self.command("undo");
+                    ui.close();
+                }
+                if ui.button("Redo").clicked() {
+                    self.command("redo");
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Copy").clicked() {
+                    self.copy_selection_to_clipboard();
+                    ui.close();
+                }
+                if ui.button("Cut").clicked() {
+                    self.cut_selection_to_clipboard();
+                    ui.close();
+                }
+                if ui.button("Paste").clicked() {
+                    self.paste_from_clipboard();
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Select All").clicked() {
+                    self.command("select_all");
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("Search", |ui| {
+                if ui.button("Command Palette").clicked() {
+                    self.show_command_palette = true;
+                    ui.close();
+                }
+                if ui.button("Quick Open").clicked() {
+                    self.show_quick_open_panel = true;
+                    ui.close();
+                }
+                if ui.button("Find").clicked() {
+                    self.show_find_panel = true;
+                    ui.close();
+                }
+                if ui.button("Find in Project").clicked() {
+                    self.show_project_search_panel = true;
+                    ui.close();
+                }
+                if ui.button("Goto Line").clicked() {
+                    self.show_goto_line_panel = true;
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("Navigate", |ui| {
+                if ui.button("Left").clicked() {
+                    self.command("move_left");
+                    ui.close();
+                }
+                if ui.button("Right").clicked() {
+                    self.command("move_right");
+                    ui.close();
+                }
+                if ui.button("Up").clicked() {
+                    self.command("move_up");
+                    ui.close();
+                }
+                if ui.button("Down").clicked() {
+                    self.command("move_down");
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Home").clicked() {
+                    self.command("move_to_beginning_of_line");
+                    ui.close();
+                }
+                if ui.button("End").clicked() {
+                    self.command("move_to_end_of_line");
+                    ui.close();
+                }
+                if ui.button("Select Line").clicked() {
+                    self.command("select_line");
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("Lines", |ui| {
+                if ui.button("Split Selection Into Lines").clicked() {
+                    self.command("split_selection_into_lines");
+                    ui.close();
+                }
+                if ui.button("Duplicate Line").clicked() {
+                    self.command("duplicate_line");
+                    ui.close();
+                }
+                if ui.button("Move Lines Up").clicked() {
+                    self.command("move_lines_up");
+                    ui.close();
+                }
+                if ui.button("Move Lines Down").clicked() {
+                    self.command("move_lines_down");
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Delete To Beginning Of Line").clicked() {
+                    self.command("delete_to_beginning_of_line");
+                    ui.close();
+                }
+                if ui.button("Delete To End Of Line").clicked() {
+                    self.command("delete_to_end_of_line");
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Insert Line Below").clicked() {
+                    self.command_with_text("insert_line_after", "");
+                    ui.close();
+                }
+                if ui.button("Insert Line Above").clicked() {
+                    self.command_with_text("insert_line_before", "");
+                    ui.close();
+                }
+            });
+        });
+    }
+
     fn palette_matches(&self) -> Vec<CommandSpec> {
         let specs = self.core.command_bus().specs();
         let query = self.command_palette_query.trim().to_lowercase();
@@ -1595,111 +1754,7 @@ impl App for NeedleEditorApp {
         self.render_sidebar(ctx);
 
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("New").clicked() {
-                    self.new_file();
-                }
-                if ui.button("Open").clicked() {
-                    self.open_file_dialog();
-                }
-                if ui.button("Open Folder").clicked() {
-                    self.open_folder_dialog();
-                }
-                if ui.button("Recent Projects").clicked() {
-                    self.show_recent_projects_panel = true;
-                }
-                if ui.button("Save").clicked() {
-                    self.save_active_file();
-                }
-                if ui.button("Save As").clicked() {
-                    self.save_active_file_as();
-                }
-                if ui.button("Close").clicked() {
-                    if let Some(view_id) = self.core.state().active_view_id() {
-                        self.request_close_view(view_id);
-                    }
-                }
-                ui.separator();
-                if ui.button("Copy").clicked() {
-                    self.copy_selection_to_clipboard();
-                }
-                if ui.button("Cut").clicked() {
-                    self.cut_selection_to_clipboard();
-                }
-                if ui.button("Paste").clicked() {
-                    self.paste_from_clipboard();
-                }
-                ui.separator();
-                if ui.button("Undo").clicked() {
-                    self.command("undo");
-                }
-                if ui.button("Redo").clicked() {
-                    self.command("redo");
-                }
-                if ui.button("Palette").clicked() {
-                    self.show_command_palette = true;
-                }
-                if ui.button("Quick Open").clicked() {
-                    self.show_quick_open_panel = true;
-                }
-                if ui.button("Find").clicked() {
-                    self.show_find_panel = true;
-                }
-                if ui.button("Find in Project").clicked() {
-                    self.show_project_search_panel = true;
-                }
-                if ui.button("Goto").clicked() {
-                    self.show_goto_line_panel = true;
-                }
-                if ui.button("Select All").clicked() {
-                    self.command("select_all");
-                }
-                if ui.button("←").clicked() {
-                    self.command("move_left");
-                }
-                if ui.button("→").clicked() {
-                    self.command("move_right");
-                }
-                if ui.button("↑").clicked() {
-                    self.command("move_up");
-                }
-                if ui.button("↓").clicked() {
-                    self.command("move_down");
-                }
-                if ui.button("Home").clicked() {
-                    self.command("move_to_beginning_of_line");
-                }
-                if ui.button("End").clicked() {
-                    self.command("move_to_end_of_line");
-                }
-                if ui.button("Select Line").clicked() {
-                    self.command("select_line");
-                }
-                if ui.button("Split→Lines").clicked() {
-                    self.command("split_selection_into_lines");
-                }
-                if ui.button("Duplicate Line").clicked() {
-                    self.command("duplicate_line");
-                }
-                if ui.button("Lines ↑").clicked() {
-                    self.command("move_lines_up");
-                }
-                if ui.button("Lines ↓").clicked() {
-                    self.command("move_lines_down");
-                }
-                if ui.button("Del←Line").clicked() {
-                    self.command("delete_to_beginning_of_line");
-                }
-                if ui.button("Del→Line").clicked() {
-                    self.command("delete_to_end_of_line");
-                }
-                if ui.button("+Line Below").clicked() {
-                    self.command_with_text("insert_line_after", "");
-                }
-                if ui.button("+Line Above").clicked() {
-                    self.command_with_text("insert_line_before", "");
-                }
-            });
+            self.render_top_menu_bar(ui);
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
