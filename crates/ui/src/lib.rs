@@ -10,7 +10,7 @@ use anyhow::{anyhow, Result};
 use arboard::Clipboard;
 use chardetng::EncodingDetector;
 use eframe::{egui, App, Frame, NativeOptions};
-use egui::text::{CCursor, CCursorRange};
+use egui::text::{CCursor, CCursorRange, LayoutJob};
 use encoding_rs::{Encoding, UTF_16BE, UTF_16LE};
 use needle_core::{BufferError, CommandSpec, NeedleApp, Region, ViewId};
 use needle_search::{
@@ -1334,6 +1334,19 @@ impl NeedleEditorApp {
             .collect()
     }
 
+    fn current_find_match_range(&self) -> Option<std::ops::Range<usize>> {
+        let active = self
+            .core
+            .state()
+            .active_selection_regions()
+            .and_then(|regions| regions.last().cloned())?;
+        let selected = self.selected_texts().ok()?.join("\n");
+        if selected != self.find_query {
+            return None;
+        }
+        Some(active.begin()..active.end())
+    }
+
     fn current_find_match_index(&self, matches: &[std::ops::Range<usize>]) -> Option<usize> {
         let active = self
             .core
@@ -1343,6 +1356,78 @@ impl NeedleEditorApp {
         matches
             .iter()
             .position(|range| range.start == active.begin() && range.end == active.end())
+    }
+
+    fn layout_editor_job(
+        ui: &egui::Ui,
+        text: &str,
+        wrap_width: f32,
+        matches: &[std::ops::Range<usize>],
+        current_match: Option<std::ops::Range<usize>>,
+    ) -> std::sync::Arc<egui::Galley> {
+        let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+        let text_color = ui.visuals().text_color();
+        let base = egui::TextFormat {
+            font_id: font_id.clone(),
+            color: text_color,
+            ..Default::default()
+        };
+        let normal_match = egui::TextFormat {
+            font_id: font_id.clone(),
+            color: text_color,
+            background: ui.visuals().selection.bg_fill.gamma_multiply(0.45),
+            ..Default::default()
+        };
+        let current_match_format = egui::TextFormat {
+            font_id,
+            color: text_color,
+            background: ui.visuals().selection.bg_fill,
+            ..Default::default()
+        };
+
+        let mut job = LayoutJob::default();
+        job.text = text.to_string();
+        job.wrap.max_width = wrap_width;
+
+        if matches.is_empty() {
+            job.sections.push(egui::text::LayoutSection {
+                leading_space: 0.0,
+                byte_range: 0..text.len(),
+                format: base,
+            });
+            return ui.fonts_mut(|fonts| fonts.layout_job(job));
+        }
+
+        let mut cursor = 0;
+        for range in matches {
+            if range.start > cursor {
+                job.sections.push(egui::text::LayoutSection {
+                    leading_space: 0.0,
+                    byte_range: cursor..range.start,
+                    format: base.clone(),
+                });
+            }
+            job.sections.push(egui::text::LayoutSection {
+                leading_space: 0.0,
+                byte_range: range.clone(),
+                format: if current_match.as_ref() == Some(range) {
+                    current_match_format.clone()
+                } else {
+                    normal_match.clone()
+                },
+            });
+            cursor = range.end;
+        }
+
+        if cursor < text.len() {
+            job.sections.push(egui::text::LayoutSection {
+                leading_space: 0.0,
+                byte_range: cursor..text.len(),
+                format: base,
+            });
+        }
+
+        ui.fonts_mut(|fonts| fonts.layout_job(job))
     }
 
     fn selection_status(&self) -> String {
@@ -2037,12 +2122,25 @@ impl App for NeedleEditorApp {
             });
             ui.add_space(4.0);
 
+            let editor_matches = self.find_match_ranges();
+            let current_editor_match = self.current_find_match_range();
+            let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+                Self::layout_editor_job(
+                    ui,
+                    text.as_str(),
+                    wrap_width,
+                    &editor_matches,
+                    current_editor_match.clone(),
+                )
+            };
+
             let editor_id = self.editor_widget_id();
             let output = egui::TextEdit::multiline(&mut self.editor_text)
                 .id_source(editor_id)
                 .desired_rows(32)
                 .desired_width(f32::INFINITY)
                 .font(egui::TextStyle::Monospace)
+                .layouter(&mut layouter)
                 .code_editor()
                 .show(ui);
 
