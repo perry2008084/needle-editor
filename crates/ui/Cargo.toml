@@ -15,4 +15,6 @@ notify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+encoding_rs = "0.8"
+chardetng = "0.1"
 needle-core.workspace = true

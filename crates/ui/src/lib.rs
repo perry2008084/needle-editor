@@ -2,6 +2,8 @@ use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, sync::mpsc::{self, R
 
 use anyhow::{anyhow, Result};
 use arboard::Clipboard;
+use chardetng::EncodingDetector;
+use encoding_rs::{Encoding, UTF_16BE, UTF_16LE};
 use eframe::{egui, App, Frame, NativeOptions};
 use egui::text::{CCursor, CCursorRange};
 use needle_core::{BufferError, CommandSpec, NeedleApp, Region, ViewId};
@@ -39,6 +41,61 @@ struct ProjectSearchMatch {
     relative_path: String,
     line_number: usize,
     line_text: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TextFileEncoding {
+    Utf8,
+    Utf8Bom,
+    Utf16Le,
+    Utf16Be,
+    Legacy(&'static Encoding),
+}
+
+impl TextFileEncoding {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Utf8 => "UTF-8",
+            Self::Utf8Bom => "UTF-8 with BOM",
+            Self::Utf16Le => "UTF-16 LE",
+            Self::Utf16Be => "UTF-16 BE",
+            Self::Legacy(encoding) => encoding.name(),
+        }
+    }
+
+    fn encode(self, text: &str) -> Vec<u8> {
+        match self {
+            Self::Utf8 => text.as_bytes().to_vec(),
+            Self::Utf8Bom => {
+                let mut bytes = vec![0xEF, 0xBB, 0xBF];
+                bytes.extend_from_slice(text.as_bytes());
+                bytes
+            }
+            Self::Utf16Le => {
+                let mut bytes = vec![0xFF, 0xFE];
+                for unit in text.encode_utf16() {
+                    bytes.extend_from_slice(&unit.to_le_bytes());
+                }
+                bytes
+            }
+            Self::Utf16Be => {
+                let mut bytes = vec![0xFE, 0xFF];
+                for unit in text.encode_utf16() {
+                    bytes.extend_from_slice(&unit.to_be_bytes());
+                }
+                bytes
+            }
+            Self::Legacy(encoding) => {
+                let (encoded, _, _) = encoding.encode(text);
+                encoded.into_owned()
+            }
+        }
+    }
+}
+
+struct DecodedTextFile {
+    text: String,
+    encoding: TextFileEncoding,
 }
 
 pub fn run_native() -> Result<()> {
@@ -89,6 +146,7 @@ pub struct NeedleEditorApp {
     last_project_scan: Option<Instant>,
     project_watcher: Option<RecommendedWatcher>,
     project_watcher_rx: Option<Receiver<notify::Result<Event>>>,
+    file_encodings: BTreeMap<PathBuf, TextFileEncoding>,
 }
 
 impl Default for NeedleEditorApp {
@@ -132,6 +190,7 @@ impl Default for NeedleEditorApp {
             last_project_scan: None,
             project_watcher: None,
             project_watcher_rx: None,
+            file_encodings: BTreeMap::new(),
         };
         app.sync_from_core(true);
         app
@@ -373,9 +432,10 @@ impl NeedleEditorApp {
             if results.len() >= 200 {
                 break;
             }
-            let Ok(text) = fs::read_to_string(&entry.path) else {
+            let Ok(decoded) = read_text_file(&entry.path) else {
                 continue;
             };
+            let text = decoded.text;
             for (index, line) in text.lines().enumerate() {
                 let matched = if self.project_search_case_sensitive {
                     line.contains(&needle)
@@ -407,6 +467,14 @@ impl NeedleEditorApp {
             .state()
             .active_buffer()
             .and_then(|buffer| buffer.path().cloned())
+    }
+
+    fn current_file_encoding_label(&self) -> &'static str {
+        self.active_path()
+            .as_ref()
+            .and_then(|path| self.file_encodings.get(path).copied())
+            .unwrap_or(TextFileEncoding::Utf8)
+            .label()
     }
 
     fn path_for_view(&self, view_id: ViewId) -> Option<PathBuf> {
@@ -526,14 +594,26 @@ impl NeedleEditorApp {
             .active_buffer()
             .map(|buffer| buffer.content().to_string())
             .unwrap_or_default();
+        let previous_path = self.active_path();
+        let encoding = previous_path
+            .as_ref()
+            .and_then(|current| self.file_encodings.get(current).copied())
+            .or_else(|| self.file_encodings.get(&path).copied())
+            .unwrap_or(TextFileEncoding::Utf8);
 
-        match fs::write(&path, contents) {
+        match fs::write(&path, encoding.encode(&contents)) {
             Ok(()) => {
+                if let Some(previous_path) = previous_path.as_ref() {
+                    if previous_path != &path {
+                        self.file_encodings.remove(previous_path);
+                    }
+                }
+                self.file_encodings.insert(path.clone(), encoding);
                 if let Some(buffer) = self.core.state_mut().active_buffer_mut() {
                     buffer.set_path(path.clone());
                     buffer.set_dirty(false);
                 }
-                self.set_status(format!("Saved {}", path.display()));
+                self.set_status(format!("Saved {} ({})", path.display(), encoding.label()));
             }
             Err(err) => self.set_status(format!("Save failed: {err}")),
         }
@@ -584,8 +664,10 @@ impl NeedleEditorApp {
             return;
         }
 
-        match fs::read_to_string(&path) {
-            Ok(contents) => {
+        match read_text_file(&path) {
+            Ok(decoded) => {
+                let encoding = decoded.encoding;
+                let contents = decoded.text;
                 let (buffer_id, _view_id) = self.core.state_mut().create_empty_buffer_and_view();
                 if let Some(buffer) = self.core.state_mut().buffer_mut(buffer_id) {
                     if let Err(err) = buffer.replace(0..0, &contents) {
@@ -595,8 +677,9 @@ impl NeedleEditorApp {
                     buffer.set_path(path.clone());
                     buffer.set_dirty(false);
                 }
+                self.file_encodings.insert(path.clone(), encoding);
                 self.sync_from_core(true);
-                self.set_status(format!("Opened {}", path.display()));
+                self.set_status(format!("Opened {} ({})", path.display(), encoding.label()));
             }
             Err(err) => self.set_status(format!("Open failed: {err}")),
         }
@@ -1648,6 +1731,8 @@ impl App for NeedleEditorApp {
                 ui.separator();
                 ui.label(self.selection_status());
                 ui.separator();
+                ui.label(format!("Encoding: {}", self.current_file_encoding_label()));
+                ui.separator();
                 ui.label(format!(
                     "{} chars",
                     self.core
@@ -1867,4 +1952,77 @@ fn save_recent_projects(projects: &[PathBuf]) {
         return;
     };
     let _ = fs::write(path, text);
+}
+
+fn read_text_file(path: &Path) -> Result<DecodedTextFile> {
+    let bytes = fs::read(path)?;
+    Ok(decode_text_bytes(&bytes))
+}
+
+fn decode_text_bytes(bytes: &[u8]) -> DecodedTextFile {
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return DecodedTextFile {
+            text: String::from_utf8_lossy(&bytes[3..]).into_owned(),
+            encoding: TextFileEncoding::Utf8Bom,
+        };
+    }
+
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        let (text, _, _) = UTF_16LE.decode(&bytes[2..]);
+        return DecodedTextFile {
+            text: text.into_owned(),
+            encoding: TextFileEncoding::Utf16Le,
+        };
+    }
+
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        let (text, _, _) = UTF_16BE.decode(&bytes[2..]);
+        return DecodedTextFile {
+            text: text.into_owned(),
+            encoding: TextFileEncoding::Utf16Be,
+        };
+    }
+
+    if let Ok(text) = String::from_utf8(bytes.to_vec()) {
+        return DecodedTextFile {
+            text,
+            encoding: TextFileEncoding::Utf8,
+        };
+    }
+
+    let mut detector = EncodingDetector::new();
+    detector.feed(bytes, true);
+    let guessed = detector.guess(None, true);
+    let encoding = if guessed == UTF_16LE {
+        TextFileEncoding::Utf16Le
+    } else if guessed == UTF_16BE {
+        TextFileEncoding::Utf16Be
+    } else {
+        TextFileEncoding::Legacy(guessed)
+    };
+    let (text, _, _) = guessed.decode(bytes);
+    DecodedTextFile {
+        text: text.into_owned(),
+        encoding,
+    }
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::{decode_text_bytes, TextFileEncoding};
+
+    #[test]
+    fn decodes_utf8_text() {
+        let decoded = decode_text_bytes("中文 UTF-8".as_bytes());
+        assert_eq!(decoded.text, "中文 UTF-8");
+        assert!(matches!(decoded.encoding, TextFileEncoding::Utf8));
+    }
+
+    #[test]
+    fn decodes_gbk_text() {
+        let (encoded, _, _) = encoding_rs::GBK.encode("中文内容");
+        let decoded = decode_text_bytes(encoded.as_ref());
+        assert_eq!(decoded.text, "中文内容");
+        assert!(matches!(decoded.encoding, TextFileEncoding::Legacy(enc) if enc == encoding_rs::GBK));
+    }
 }
