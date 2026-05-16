@@ -18,3 +18,4 @@ tracing.workspace = true
 encoding_rs = "0.8"
 chardetng = "0.1"
 needle-core.workspace = true
+needle-search.workspace = true

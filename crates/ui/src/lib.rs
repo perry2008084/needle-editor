@@ -1,12 +1,22 @@
-use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, sync::mpsc::{self, Receiver}, time::{Duration, Instant, SystemTime}};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fs,
+    path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver},
+    time::{Duration, Instant, SystemTime},
+};
 
 use anyhow::{anyhow, Result};
 use arboard::Clipboard;
 use chardetng::EncodingDetector;
-use encoding_rs::{Encoding, UTF_16BE, UTF_16LE};
 use eframe::{egui, App, Frame, NativeOptions};
 use egui::text::{CCursor, CCursorRange};
+use encoding_rs::{Encoding, UTF_16BE, UTF_16LE};
 use needle_core::{BufferError, CommandSpec, NeedleApp, Region, ViewId};
+use needle_search::{
+    ProjectFileEntry, ProjectIndex, ProjectSearchMatch, ProjectTextSearchEvent,
+    ProjectTextSearchQuery,
+};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -22,25 +32,33 @@ struct KeyBindingConfig {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct ProjectSettingsFile {
-    #[serde(default)]
-    show_hidden_files: bool,
+    show_hidden_files: Option<bool>,
     sidebar_width: Option<f32>,
     #[serde(default)]
     keybindings: Vec<KeyBindingConfig>,
 }
 
 #[derive(Debug, Clone)]
-struct ProjectFileEntry {
-    path: PathBuf,
-    relative_path: String,
+struct ResolvedSettings {
+    show_hidden_files: bool,
+    sidebar_width: f32,
+    keybindings: Vec<KeyBindingConfig>,
 }
 
-#[derive(Debug, Clone)]
-struct ProjectSearchMatch {
-    path: PathBuf,
-    relative_path: String,
-    line_number: usize,
-    line_text: String,
+impl Default for ResolvedSettings {
+    fn default() -> Self {
+        Self {
+            show_hidden_files: false,
+            sidebar_width: 220.0,
+            keybindings: Vec::new(),
+        }
+    }
+}
+
+struct ProjectSearchTask {
+    receiver: Receiver<ProjectTextSearchEvent>,
+    scanned_files: usize,
+    total_matches: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -136,17 +154,24 @@ pub struct NeedleEditorApp {
     pending_close_view: Option<ViewId>,
     clipboard: Option<Clipboard>,
     project_root: Option<PathBuf>,
+    user_settings_path: Option<PathBuf>,
+    user_settings_mtime: Option<SystemTime>,
+    user_settings: ProjectSettingsFile,
     project_settings_path: Option<PathBuf>,
     project_settings_mtime: Option<SystemTime>,
     project_settings: ProjectSettingsFile,
+    resolved_settings: ResolvedSettings,
     sidebar_width: f32,
     expanded_dirs: BTreeMap<PathBuf, bool>,
-    project_files: Vec<ProjectFileEntry>,
-    project_index_generation: u64,
+    project_index: Option<ProjectIndex>,
+    project_search_task: Option<ProjectSearchTask>,
+    project_search_status: String,
     last_project_scan: Option<Instant>,
     project_watcher: Option<RecommendedWatcher>,
     project_watcher_rx: Option<Receiver<notify::Result<Event>>>,
     file_encodings: BTreeMap<PathBuf, TextFileEncoding>,
+    desired_editor_selection: Option<(usize, usize)>,
+    suppress_selection_sync_once: bool,
 }
 
 impl Default for NeedleEditorApp {
@@ -180,18 +205,26 @@ impl Default for NeedleEditorApp {
             pending_close_view: None,
             clipboard: Clipboard::new().ok(),
             project_root: None,
+            user_settings_path: default_user_settings_path(),
+            user_settings_mtime: None,
+            user_settings: ProjectSettingsFile::default(),
             project_settings_path: None,
             project_settings_mtime: None,
             project_settings: ProjectSettingsFile::default(),
+            resolved_settings: ResolvedSettings::default(),
             sidebar_width: 220.0,
             expanded_dirs: BTreeMap::new(),
-            project_files: Vec::new(),
-            project_index_generation: 0,
+            project_index: None,
+            project_search_task: None,
+            project_search_status: "Idle".to_string(),
             last_project_scan: None,
             project_watcher: None,
             project_watcher_rx: None,
             file_encodings: BTreeMap::new(),
+            desired_editor_selection: None,
+            suppress_selection_sync_once: false,
         };
+        app.reload_user_settings_if_needed(true);
         app.sync_from_core(true);
         app
     }
@@ -208,6 +241,13 @@ impl NeedleEditorApp {
                 self.editor_text = buffer.content().to_string();
                 self.last_synced_revision = buffer.revision();
                 self.last_synced_view = active_view;
+                self.desired_editor_selection = self
+                    .core
+                    .state()
+                    .active_selection_regions()
+                    .and_then(|regions| {
+                        regions.last().map(|region| (region.begin(), region.end()))
+                    });
             }
         }
     }
@@ -226,7 +266,8 @@ impl NeedleEditorApp {
             None => return,
         };
 
-        let Some((range, replacement)) = compute_minimal_text_edit(&previous_text, &self.editor_text)
+        let Some((range, replacement)) =
+            compute_minimal_text_edit(&previous_text, &self.editor_text)
         else {
             return;
         };
@@ -249,8 +290,33 @@ impl NeedleEditorApp {
         self.status_message = status.into();
     }
 
+    fn active_keybindings(&self) -> Vec<KeyBindingConfig> {
+        let mut merged: Vec<KeyBindingConfig> = Vec::new();
+        let mut by_shortcut: HashMap<String, usize> = HashMap::new();
+
+        for binding in self.resolved_settings.keybindings.iter().cloned() {
+            let signature = keybinding_signature(&binding);
+            if let Some(existing) = by_shortcut.get(&signature).copied() {
+                merged[existing] = binding;
+            } else {
+                by_shortcut.insert(signature, merged.len());
+                merged.push(binding);
+            }
+        }
+
+        merged
+    }
+
+    fn apply_resolved_settings(&mut self) {
+        self.resolved_settings = resolve_settings(&self.user_settings, &self.project_settings);
+        self.sidebar_width = self.resolved_settings.sidebar_width.clamp(140.0, 480.0);
+    }
+
     fn command(&mut self, name: &str) {
-        match self.core.execute_command(name, self.core.default_invocation()) {
+        match self
+            .core
+            .execute_command(name, self.core.default_invocation())
+        {
             Ok(output) => {
                 if let Some(message) = output.message {
                     self.set_status(message);
@@ -462,30 +528,87 @@ impl NeedleEditorApp {
     }
 
     fn quick_open_matches(&self) -> Vec<ProjectFileEntry> {
-        let query = self.quick_open_query.trim().to_lowercase();
-        if query.is_empty() {
-            return self.project_files.iter().take(200).cloned().collect();
-        }
-
-        let mut scored = self
-            .project_files
-            .iter()
-            .filter_map(|entry| {
-                fuzzy_match_score(&entry.relative_path.to_lowercase(), &query)
-                    .map(|score| (score, entry.clone()))
-            })
-            .collect::<Vec<_>>();
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.relative_path.cmp(&b.1.relative_path)));
-        scored.into_iter().map(|(_, entry)| entry).take(200).collect()
+        self.project_index
+            .as_ref()
+            .map(|index| index.quick_open_matches(&self.quick_open_query, 200))
+            .unwrap_or_default()
     }
 
     fn project_search_matches(&self) -> Vec<ProjectSearchMatch> {
         self.cached_project_search_results.clone()
     }
 
+    fn project_index_generation(&self) -> u64 {
+        self.project_index
+            .as_ref()
+            .map(|index| index.generation())
+            .unwrap_or(0)
+    }
+
+    fn indexed_project_file_count(&self) -> usize {
+        self.project_index
+            .as_ref()
+            .map(|index| index.file_count())
+            .unwrap_or(0)
+    }
+
+    fn poll_project_search_task(&mut self) {
+        let mut next_status = None;
+        let mut clear_task = false;
+
+        if let Some(task) = self.project_search_task.as_mut() {
+            loop {
+                match task.receiver.try_recv() {
+                    Ok(ProjectTextSearchEvent::Batch(batch)) => {
+                        task.scanned_files = batch.scanned_files;
+                        task.total_matches = batch.total_matches;
+                        self.cached_project_search_results.extend(batch.matches);
+                        next_status = Some(format!(
+                            "Searching… {} match(es) in {} file(s)",
+                            task.total_matches, task.scanned_files
+                        ));
+                    }
+                    Ok(ProjectTextSearchEvent::Complete(summary)) => {
+                        task.scanned_files = summary.scanned_files;
+                        task.total_matches = summary.total_matches;
+                        next_status = Some(if summary.total_matches == 0 {
+                            format!("No matches in {} file(s)", summary.scanned_files)
+                        } else {
+                            format!(
+                                "Found {} match(es) in {} file(s)",
+                                summary.total_matches, summary.scanned_files
+                            )
+                        });
+                        clear_task = true;
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        next_status = Some(format!(
+                            "Search stopped at {} match(es) in {} file(s)",
+                            task.total_matches, task.scanned_files
+                        ));
+                        clear_task = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some(status) = next_status {
+            self.project_search_status = status;
+        }
+        if clear_task {
+            self.project_search_task = None;
+        }
+    }
+
     fn refresh_project_index_if_needed(&mut self, force: bool, announce: bool) {
         let Some(root) = self.project_root.as_deref() else {
-            self.project_files.clear();
+            self.project_index = None;
+            self.project_search_task = None;
+            self.project_search_status = "Idle".to_string();
+            self.cached_project_search_results.clear();
             self.last_project_scan = None;
             self.project_watcher = None;
             self.project_watcher_rx = None;
@@ -502,16 +625,30 @@ impl NeedleEditorApp {
         }
 
         self.last_project_scan = Some(Instant::now());
-        let mut files = Vec::new();
-        let new_generation = scan_project_files(root, self.project_settings.show_hidden_files, &mut files);
-        files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+        let new_index = ProjectIndex::build(root, self.resolved_settings.show_hidden_files);
+        let file_count = new_index.file_count();
+        let changed = self
+            .project_index
+            .as_ref()
+            .map(|current| {
+                current.root() != new_index.root()
+                    || current.show_hidden() != new_index.show_hidden()
+                    || current.generation() != new_index.generation()
+            })
+            .unwrap_or(true);
 
-        if force || new_generation != self.project_index_generation {
-            self.project_files = files;
-            self.project_index_generation = new_generation;
+        self.project_index = Some(new_index);
+
+        if force || changed {
+            self.project_search_task = None;
             self.cached_project_search_generation = 0;
+            if self.project_search_query.trim().is_empty() {
+                self.project_search_status = "Idle".to_string();
+            } else {
+                self.project_search_status = "Search ready to refresh…".to_string();
+            }
             if announce {
-                self.set_status(format!("Indexed {} project file(s)", self.project_files.len()));
+                self.set_status(format!("Indexed {} project file(s)", file_count));
             }
         }
     }
@@ -570,60 +707,44 @@ impl NeedleEditorApp {
 
     fn refresh_project_search_results_if_needed(&mut self) {
         let query = self.project_search_query.trim().to_string();
+        let generation = self.project_index_generation();
         if query.is_empty() {
             self.cached_project_search_results.clear();
             self.cached_project_search_query.clear();
-            self.cached_project_search_generation = self.project_index_generation;
+            self.cached_project_search_generation = generation;
             self.cached_project_search_case_sensitive = self.project_search_case_sensitive;
+            self.project_search_task = None;
+            self.project_search_status = "Idle".to_string();
             return;
         }
 
         let needs_refresh = self.cached_project_search_query != query
             || self.cached_project_search_case_sensitive != self.project_search_case_sensitive
-            || self.cached_project_search_generation != self.project_index_generation;
+            || self.cached_project_search_generation != generation;
         if !needs_refresh {
             return;
         }
 
-        let mut results = Vec::new();
-        let needle = if self.project_search_case_sensitive {
-            query.clone()
-        } else {
-            query.to_lowercase()
+        let Some(index) = self.project_index.as_ref() else {
+            return;
         };
 
-        for entry in &self.project_files {
-            if results.len() >= 200 {
-                break;
-            }
-            let Ok(decoded) = read_text_file(&entry.path) else {
-                continue;
-            };
-            let text = decoded.text;
-            for (index, line) in text.lines().enumerate() {
-                let matched = if self.project_search_case_sensitive {
-                    line.contains(&needle)
-                } else {
-                    line.to_lowercase().contains(&needle)
-                };
-                if matched {
-                    results.push(ProjectSearchMatch {
-                        path: entry.path.clone(),
-                        relative_path: entry.relative_path.clone(),
-                        line_number: index + 1,
-                        line_text: line.trim().to_string(),
-                    });
-                    if results.len() >= 200 {
-                        break;
-                    }
-                }
-            }
-        }
-
-        self.cached_project_search_query = query;
+        self.cached_project_search_query = query.clone();
         self.cached_project_search_case_sensitive = self.project_search_case_sensitive;
-        self.cached_project_search_generation = self.project_index_generation;
-        self.cached_project_search_results = results;
+        self.cached_project_search_generation = generation;
+        self.cached_project_search_results.clear();
+
+        let mut search_query = ProjectTextSearchQuery::new(query.clone());
+        search_query.case_sensitive = self.project_search_case_sensitive;
+        search_query.limit = 200;
+        search_query.batch_size = 24;
+
+        self.project_search_task = Some(ProjectSearchTask {
+            receiver: index.spawn_text_search(search_query),
+            scanned_files: 0,
+            total_matches: 0,
+        });
+        self.project_search_status = "Searching…".to_string();
     }
 
     fn active_path(&self) -> Option<PathBuf> {
@@ -796,7 +917,10 @@ impl NeedleEditorApp {
         self.project_settings_mtime = None;
         self.quick_open_query.clear();
         self.project_search_query.clear();
+        self.cached_project_search_query.clear();
         self.cached_project_search_results.clear();
+        self.project_search_task = None;
+        self.project_search_status = "Idle".to_string();
         self.expanded_dirs.clear();
         self.expanded_dirs.insert(path.clone(), true);
         self.push_recent_project(path.clone());
@@ -849,12 +973,51 @@ impl NeedleEditorApp {
         }
     }
 
+    fn reload_user_settings_if_needed(&mut self, force: bool) {
+        let Some(path) = self.user_settings_path.clone() else {
+            return;
+        };
+
+        let old_show_hidden = self.resolved_settings.show_hidden_files;
+        let metadata = fs::metadata(&path).ok();
+        let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
+        let changed = force || modified != self.user_settings_mtime;
+        if !changed {
+            return;
+        }
+
+        self.user_settings_mtime = modified;
+        if metadata.is_none() {
+            self.user_settings = ProjectSettingsFile::default();
+            self.apply_resolved_settings();
+            if self.project_root.is_some()
+                && old_show_hidden != self.resolved_settings.show_hidden_files
+            {
+                self.refresh_project_index_if_needed(true, false);
+            }
+            return;
+        }
+
+        match read_settings_file(&path) {
+            Ok(settings) => {
+                self.user_settings = settings;
+                self.apply_resolved_settings();
+                if self.project_root.is_some()
+                    && old_show_hidden != self.resolved_settings.show_hidden_files
+                {
+                    self.refresh_project_index_if_needed(true, false);
+                }
+            }
+            Err(err) => self.set_status(format!("Failed to load {}: {err}", path.display())),
+        }
+    }
+
     fn reload_project_settings_if_needed(&mut self, force: bool) {
         let Some(path) = self.project_settings_path.clone() else {
             return;
         };
 
-        let old_show_hidden = self.project_settings.show_hidden_files;
+        let old_show_hidden = self.resolved_settings.show_hidden_files;
         let metadata = fs::metadata(&path).ok();
         let modified = metadata.as_ref().and_then(|meta| meta.modified().ok());
         let changed = force || modified != self.project_settings_mtime;
@@ -865,33 +1028,35 @@ impl NeedleEditorApp {
         self.project_settings_mtime = modified;
         if metadata.is_none() {
             self.project_settings = ProjectSettingsFile::default();
-            self.sidebar_width = 220.0;
-            if self.project_root.is_some() && old_show_hidden {
+            self.apply_resolved_settings();
+            if self.project_root.is_some()
+                && old_show_hidden != self.resolved_settings.show_hidden_files
+            {
                 self.refresh_project_index_if_needed(true, false);
             }
             return;
         }
 
-        match fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<ProjectSettingsFile>(&text).ok())
-        {
-            Some(settings) => {
-                self.sidebar_width = settings.sidebar_width.unwrap_or(220.0).clamp(140.0, 480.0);
-                let show_hidden_changed = settings.show_hidden_files != old_show_hidden;
+        match read_settings_file(&path) {
+            Ok(settings) => {
                 self.project_settings = settings;
-                if self.project_root.is_some() && (force || show_hidden_changed) {
+                self.apply_resolved_settings();
+                if self.project_root.is_some()
+                    && (force || old_show_hidden != self.resolved_settings.show_hidden_files)
+                {
                     self.refresh_project_index_if_needed(true, false);
                 }
             }
-            None => self.set_status(format!("Failed to parse {}", path.display())),
+            Err(err) => self.set_status(format!("Failed to load {}: {err}", path.display())),
         }
     }
 
     fn selected_texts(&self) -> Result<Vec<String>, BufferError> {
         let state = self.core.state();
         let buffer = state.active_buffer().ok_or(BufferError::NoActiveView)?;
-        let regions = state.active_selection_regions().ok_or(BufferError::NoActiveView)?;
+        let regions = state
+            .active_selection_regions()
+            .ok_or(BufferError::NoActiveView)?;
         let mut out = Vec::new();
         for region in regions {
             if region.empty() {
@@ -981,6 +1146,11 @@ impl NeedleEditorApp {
     }
 
     fn update_selection_from_egui(&mut self, primary_char: usize, secondary_char: usize) {
+        if self.suppress_selection_sync_once {
+            self.suppress_selection_sync_once = false;
+            return;
+        }
+
         let primary = char_index_to_byte_index(&self.editor_text, primary_char);
         let secondary = char_index_to_byte_index(&self.editor_text, secondary_char);
         if let Err(err) = self
@@ -1001,10 +1171,12 @@ impl NeedleEditorApp {
         let end_char = byte_index_to_char_index(&self.editor_text, end_byte);
         let id = self.editor_widget_id();
         let mut state = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
-        state
-            .cursor
-            .set_char_range(Some(CCursorRange::two(CCursor::new(end_char), CCursor::new(start_char))));
+        state.cursor.set_char_range(Some(CCursorRange::two(
+            CCursor::new(end_char),
+            CCursor::new(start_char),
+        )));
         egui::TextEdit::store_state(ctx, id, state);
+        self.suppress_selection_sync_once = true;
         ctx.memory_mut(|mem| mem.request_focus(id));
     }
 
@@ -1067,9 +1239,11 @@ impl NeedleEditorApp {
             .min(self.editor_text.len());
 
         let haystack = &self.editor_text;
-        let found = haystack[..end_at]
-            .rfind(&query)
-            .or_else(|| haystack[end_at..].rfind(&query).map(|offset| end_at + offset));
+        let found = haystack[..end_at].rfind(&query).or_else(|| {
+            haystack[end_at..]
+                .rfind(&query)
+                .map(|offset| end_at + offset)
+        });
 
         match found {
             Some(start) => self.select_match(ctx, start, start + query.len()),
@@ -1138,6 +1312,28 @@ impl NeedleEditorApp {
         }
     }
 
+    fn find_match_ranges(&self) -> Vec<std::ops::Range<usize>> {
+        if self.find_query.is_empty() {
+            return Vec::new();
+        }
+
+        self.editor_text
+            .match_indices(&self.find_query)
+            .map(|(start, matched)| start..start + matched.len())
+            .collect()
+    }
+
+    fn current_find_match_index(&self, matches: &[std::ops::Range<usize>]) -> Option<usize> {
+        let active = self
+            .core
+            .state()
+            .active_selection_regions()
+            .and_then(|regions| regions.last().cloned())?;
+        matches
+            .iter()
+            .position(|range| range.start == active.begin() && range.end == active.end())
+    }
+
     fn selection_status(&self) -> String {
         let Some(buffer) = self.core.state().active_buffer() else {
             return "Ln 1, Col 1".to_string();
@@ -1184,9 +1380,15 @@ impl NeedleEditorApp {
             return false;
         }
 
-        let wants_command = binding.modifiers.iter().any(|m| eq_mod(m, "command") || eq_mod(m, "ctrl"));
+        let wants_command = binding
+            .modifiers
+            .iter()
+            .any(|m| eq_mod(m, "command") || eq_mod(m, "ctrl"));
         let wants_shift = binding.modifiers.iter().any(|m| eq_mod(m, "shift"));
-        let wants_alt = binding.modifiers.iter().any(|m| eq_mod(m, "alt") || eq_mod(m, "option"));
+        let wants_alt = binding
+            .modifiers
+            .iter()
+            .any(|m| eq_mod(m, "alt") || eq_mod(m, "option"));
 
         input.modifiers.command == wants_command
             && input.modifiers.shift == wants_shift
@@ -1206,8 +1408,15 @@ impl NeedleEditorApp {
                 self.sidebar_width = ui.available_width();
                 ui.heading("Project");
                 ui.label(project_root.display().to_string());
-                ui.label(format!("{} indexed file(s)", self.project_files.len()));
-                ui.label(if self.project_watcher.is_some() { "Watcher: active" } else { "Watcher: unavailable" });
+                ui.label(format!(
+                    "{} indexed file(s)",
+                    self.indexed_project_file_count()
+                ));
+                ui.label(if self.project_watcher.is_some() {
+                    "Watcher: active"
+                } else {
+                    "Watcher: unavailable"
+                });
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui.button("Refresh Settings").clicked() {
@@ -1236,7 +1445,10 @@ impl NeedleEditorApp {
         };
 
         if path.is_dir() {
-            let is_open = *self.expanded_dirs.entry(path.to_path_buf()).or_insert(depth == 0);
+            let is_open = *self
+                .expanded_dirs
+                .entry(path.to_path_buf())
+                .or_insert(depth == 0);
             ui.horizontal(|ui| {
                 ui.add_space((depth as f32) * 12.0);
                 let arrow = if is_open { "▾" } else { "▸" };
@@ -1254,7 +1466,7 @@ impl NeedleEditorApp {
                     Err(_) => Vec::new(),
                 };
                 children.retain(|child| {
-                    self.project_settings.show_hidden_files
+                    self.resolved_settings.show_hidden_files
                         || child
                             .file_name()
                             .and_then(|n| n.to_str())
@@ -1352,8 +1564,8 @@ impl NeedleEditorApp {
             if command && input.key_pressed(egui::Key::W) {
                 close = true;
             }
-            for binding in &self.project_settings.keybindings {
-                if Self::key_matches(input, binding) {
+            for binding in self.active_keybindings() {
+                if Self::key_matches(input, &binding) {
                     custom_commands.push(binding.command.clone());
                 }
             }
@@ -1478,20 +1690,22 @@ impl NeedleEditorApp {
                 }
 
                 ui.separator();
-                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                    for spec in &matches {
-                        let button = ui.selectable_label(
-                            false,
-                            format!("{} — {}", spec.name, spec.description),
-                        );
-                        if button.clicked() {
-                            self.execute_palette_command(&spec.name);
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        for spec in &matches {
+                            let button = ui.selectable_label(
+                                false,
+                                format!("{} — {}", spec.name, spec.description),
+                            );
+                            if button.clicked() {
+                                self.execute_palette_command(&spec.name);
+                            }
                         }
-                    }
-                    if matches.is_empty() {
-                        ui.label("No matching commands");
-                    }
-                });
+                        if matches.is_empty() {
+                            ui.label("No matching commands");
+                        }
+                    });
             });
 
         self.show_command_palette = open;
@@ -1532,17 +1746,19 @@ impl NeedleEditorApp {
 
                 ui.label(format!("{} match(es)", matches.len()));
                 ui.separator();
-                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                    for entry in &matches {
-                        if ui.selectable_label(false, &entry.relative_path).clicked() {
-                            self.open_file_path(entry.path.clone());
-                            self.show_quick_open_panel = false;
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        for entry in &matches {
+                            if ui.selectable_label(false, &entry.relative_path).clicked() {
+                                self.open_file_path(entry.path.clone());
+                                self.show_quick_open_panel = false;
+                            }
                         }
-                    }
-                    if matches.is_empty() {
-                        ui.label("No matching files");
-                    }
-                });
+                        if matches.is_empty() {
+                            ui.label("No matching files");
+                        }
+                    });
             });
 
         self.show_quick_open_panel = open;
@@ -1566,14 +1782,19 @@ impl NeedleEditorApp {
                     ui.label("No recent projects yet.");
                     return;
                 }
-                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                    for path in &projects {
-                        if ui.selectable_label(false, path.display().to_string()).clicked() {
-                            self.set_project_root(path.clone());
-                            self.show_recent_projects_panel = false;
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        for path in &projects {
+                            if ui
+                                .selectable_label(false, path.display().to_string())
+                                .clicked()
+                            {
+                                self.set_project_root(path.clone());
+                                self.show_recent_projects_panel = false;
+                            }
                         }
-                    }
-                });
+                    });
             });
 
         self.show_recent_projects_panel = open;
@@ -1604,6 +1825,7 @@ impl NeedleEditorApp {
                 );
                 response.request_focus();
                 ui.checkbox(&mut self.project_search_case_sensitive, "Case sensitive");
+                ui.label(&self.project_search_status);
 
                 let first_result = results.first().cloned();
                 let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -1611,7 +1833,8 @@ impl NeedleEditorApp {
                     if let Some(result) = first_result {
                         self.open_file_path(result.path.clone());
                         let mut json_args = Map::new();
-                        json_args.insert("line".to_string(), Value::from(result.line_number as u64));
+                        json_args
+                            .insert("line".to_string(), Value::from(result.line_number as u64));
                         self.command_with_args("goto_line", json_args);
                         self.show_project_search_panel = false;
                     }
@@ -1619,21 +1842,29 @@ impl NeedleEditorApp {
 
                 ui.label(format!("{} match(es)", results.len()));
                 ui.separator();
-                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                    for result in &results {
-                        let label = format!("{}:{}  {}", result.relative_path, result.line_number, result.line_text);
-                        if ui.selectable_label(false, label).clicked() {
-                            self.open_file_path(result.path.clone());
-                            let mut json_args = Map::new();
-                            json_args.insert("line".to_string(), Value::from(result.line_number as u64));
-                            self.command_with_args("goto_line", json_args);
-                            self.show_project_search_panel = false;
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        for result in &results {
+                            let label = format!(
+                                "{}:{}  {}",
+                                result.relative_path, result.line_number, result.line_text
+                            );
+                            if ui.selectable_label(false, label).clicked() {
+                                self.open_file_path(result.path.clone());
+                                let mut json_args = Map::new();
+                                json_args.insert(
+                                    "line".to_string(),
+                                    Value::from(result.line_number as u64),
+                                );
+                                self.command_with_args("goto_line", json_args);
+                                self.show_project_search_panel = false;
+                            }
                         }
-                    }
-                    if results.is_empty() {
-                        ui.label("No matches yet");
-                    }
-                });
+                        if results.is_empty() {
+                            ui.label("No matches yet");
+                        }
+                    });
             });
 
         self.show_project_search_panel = open;
@@ -1644,6 +1875,8 @@ impl NeedleEditorApp {
             return;
         }
 
+        let match_ranges = self.find_match_ranges();
+        let current_match_index = self.current_find_match_index(&match_ranges);
         let mut open = true;
         egui::Window::new("Find / Replace")
             .open(&mut open)
@@ -1656,6 +1889,19 @@ impl NeedleEditorApp {
                     egui::TextEdit::singleline(&mut self.find_query).hint_text("Find text..."),
                 );
                 find_response.request_focus();
+
+                if self.find_query.is_empty() {
+                    ui.label("0 matches");
+                } else if let Some(index) = current_match_index {
+                    ui.label(format!(
+                        "{} matches · current {}/{}",
+                        match_ranges.len(),
+                        index + 1,
+                        match_ranges.len()
+                    ));
+                } else {
+                    ui.label(format!("{} matches", match_ranges.len()));
+                }
 
                 ui.label("Replace");
                 ui.add(
@@ -1750,9 +1996,11 @@ impl NeedleEditorApp {
 
 impl App for NeedleEditorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
+        self.reload_user_settings_if_needed(false);
         self.reload_project_settings_if_needed(false);
         self.drain_project_watcher_events();
         self.refresh_project_index_if_needed(false, false);
+        self.poll_project_search_task();
         self.sync_from_core(false);
         self.handle_shortcuts(ctx);
         self.render_tabs(ctx);
@@ -1764,7 +2012,11 @@ impl App for NeedleEditorApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading(self.active_title());
-            ui.label(if self.file_dirty() { "Modified" } else { "Saved" });
+            ui.label(if self.file_dirty() {
+                "Modified"
+            } else {
+                "Saved"
+            });
             ui.add_space(4.0);
 
             let editor_id = self.editor_widget_id();
@@ -1776,8 +2028,15 @@ impl App for NeedleEditorApp {
                 .code_editor()
                 .show(ui);
 
+            if let Some((start, end)) = self.desired_editor_selection.take() {
+                self.set_editor_selection(ctx, start, end);
+            }
+
             if let Some(cursor_range) = &output.cursor_range {
-                self.update_selection_from_egui(cursor_range.primary.index, cursor_range.secondary.index);
+                self.update_selection_from_egui(
+                    cursor_range.primary.index,
+                    cursor_range.secondary.index,
+                );
             }
 
             if output.response.changed() {
@@ -1805,7 +2064,12 @@ impl App for NeedleEditorApp {
         });
 
         if self.project_root.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(500));
+            let repaint_after_ms = if self.project_search_task.is_some() {
+                50
+            } else {
+                500
+            };
+            ctx.request_repaint_after(Duration::from_millis(repaint_after_ms));
         }
 
         self.render_command_palette(ctx);
@@ -1816,6 +2080,79 @@ impl App for NeedleEditorApp {
         self.render_goto_line_panel(ctx);
         self.render_close_confirm(ctx);
     }
+}
+
+fn default_user_settings_path() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .map(|dir| dir.join("needle").join("settings.json"))
+}
+
+fn read_settings_file(path: &Path) -> Result<ProjectSettingsFile, String> {
+    let text = fs::read_to_string(path).map_err(|err| err.to_string())?;
+    let settings =
+        serde_json::from_str::<ProjectSettingsFile>(&text).map_err(|err| err.to_string())?;
+    validate_settings_file(&settings)?;
+    Ok(settings)
+}
+
+fn validate_settings_file(settings: &ProjectSettingsFile) -> Result<(), String> {
+    if let Some(width) = settings.sidebar_width {
+        if !width.is_finite() {
+            return Err("sidebar_width must be a finite number".to_string());
+        }
+    }
+
+    for binding in &settings.keybindings {
+        if binding.command.trim().is_empty() {
+            return Err("keybinding command must not be empty".to_string());
+        }
+        if parse_key(&binding.key).is_none() {
+            return Err(format!("unsupported keybinding key: {}", binding.key));
+        }
+        for modifier in &binding.modifiers {
+            if !matches!(
+                modifier.to_ascii_lowercase().as_str(),
+                "command" | "ctrl" | "shift" | "alt" | "option"
+            ) {
+                return Err(format!("unsupported keybinding modifier: {modifier}"));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_settings(user: &ProjectSettingsFile, project: &ProjectSettingsFile) -> ResolvedSettings {
+    let mut keybindings = user.keybindings.clone();
+    keybindings.extend(project.keybindings.clone());
+
+    ResolvedSettings {
+        show_hidden_files: project
+            .show_hidden_files
+            .or(user.show_hidden_files)
+            .unwrap_or(false),
+        sidebar_width: project
+            .sidebar_width
+            .or(user.sidebar_width)
+            .unwrap_or(220.0),
+        keybindings,
+    }
+}
+
+fn keybinding_signature(binding: &KeyBindingConfig) -> String {
+    let mut modifiers = binding
+        .modifiers
+        .iter()
+        .map(|modifier| modifier.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    modifiers.sort();
+    format!(
+        "{}::{}",
+        modifiers.join("+"),
+        binding.key.to_ascii_uppercase()
+    )
 }
 
 fn shared_prefix_len(old: &str, new: &str) -> usize {
@@ -1843,7 +2180,10 @@ fn shared_suffix_len(old: &str, new: &str) -> usize {
     suffix
 }
 
-fn compute_minimal_text_edit<'a>(old: &str, new: &'a str) -> Option<(std::ops::Range<usize>, &'a str)> {
+fn compute_minimal_text_edit<'a>(
+    old: &str,
+    new: &'a str,
+) -> Option<(std::ops::Range<usize>, &'a str)> {
     if old == new {
         return None;
     }
@@ -1909,116 +2249,13 @@ fn parse_key(key: &str) -> Option<egui::Key> {
     }
 }
 
-fn scan_project_files(root: &Path, show_hidden: bool, out: &mut Vec<ProjectFileEntry>) -> u64 {
-    let mut fingerprint = 0_u64;
-    scan_project_files_into(root, root, show_hidden, out, &mut fingerprint);
-    fingerprint
-}
-
-fn scan_project_files_into(
-    root: &Path,
-    current: &Path,
-    show_hidden: bool,
-    out: &mut Vec<ProjectFileEntry>,
-    fingerprint: &mut u64,
-) {
-    let entries = match fs::read_dir(current) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if !show_hidden && name.starts_with('.') {
-            continue;
-        }
-
-        let metadata = entry.metadata().ok();
-        let len = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
-        let modified = metadata
-            .as_ref()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
-        *fingerprint = fingerprint
-            .wrapping_mul(131)
-            .wrapping_add(hash_str(path.to_string_lossy().as_ref()))
-            .wrapping_add(len)
-            .wrapping_add(modified);
-
-        if path.is_dir() {
-            scan_project_files_into(root, &path, show_hidden, out, fingerprint);
-        } else if let Ok(relative) = path.strip_prefix(root) {
-            out.push(ProjectFileEntry {
-                path: path.clone(),
-                relative_path: relative.display().to_string(),
-            });
-        }
-    }
-}
-
-fn hash_str(value: &str) -> u64 {
-    let mut hash = 1469598103934665603_u64;
-    for byte in value.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(1099511628211);
-    }
-    hash
-}
-
-fn fuzzy_match_score(candidate: &str, query: &str) -> Option<i64> {
-    if query.is_empty() {
-        return Some(0);
-    }
-
-    let candidate_chars = candidate.chars().collect::<Vec<_>>();
-    let mut score = 0_i64;
-    let mut search_from = 0_usize;
-    let mut previous_match = None;
-
-    for query_char in query.chars() {
-        let mut matched_index = None;
-        for index in search_from..candidate_chars.len() {
-            if candidate_chars[index] == query_char {
-                matched_index = Some(index);
-                break;
-            }
-        }
-        let index = matched_index?;
-
-        score += 10;
-        if index == 0 {
-            score += 20;
-        } else if matches!(candidate_chars[index - 1], '/' | '\\' | '_' | '-' | ' ' | '.') {
-            score += 15;
-        }
-        if let Some(previous) = previous_match {
-            if index == previous + 1 {
-                score += 12;
-            } else {
-                score -= (index - previous - 1) as i64;
-            }
-        } else {
-            score -= index as i64;
-        }
-
-        previous_match = Some(index);
-        search_from = index + 1;
-    }
-
-    if candidate.contains(query) {
-        score += 30;
-    }
-    score += 20 - candidate_chars.len().min(20) as i64;
-    Some(score)
-}
-
 fn recent_projects_file_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".needle").join("recent_projects.json"))
+    Some(
+        PathBuf::from(home)
+            .join(".needle")
+            .join("recent_projects.json"),
+    )
 }
 
 fn load_recent_projects() -> Vec<PathBuf> {
@@ -2109,18 +2346,23 @@ fn decode_text_bytes(bytes: &[u8]) -> DecodedTextFile {
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_minimal_text_edit, decode_text_bytes, TextFileEncoding};
+    use super::{
+        compute_minimal_text_edit, decode_text_bytes, resolve_settings, validate_settings_file,
+        KeyBindingConfig, ProjectSettingsFile, TextFileEncoding,
+    };
 
     #[test]
     fn computes_minimal_text_edit_for_insertion() {
-        let (range, replacement) = compute_minimal_text_edit("hello world", "hello brave world").unwrap();
+        let (range, replacement) =
+            compute_minimal_text_edit("hello world", "hello brave world").unwrap();
         assert_eq!(range, 6..6);
         assert_eq!(replacement, "brave ");
     }
 
     #[test]
     fn computes_minimal_text_edit_for_deletion() {
-        let (range, replacement) = compute_minimal_text_edit("hello brave world", "hello world").unwrap();
+        let (range, replacement) =
+            compute_minimal_text_edit("hello brave world", "hello world").unwrap();
         assert_eq!(range, 6..12);
         assert_eq!(replacement, "");
     }
@@ -2138,6 +2380,49 @@ mod tests {
     }
 
     #[test]
+    fn resolves_settings_with_project_overrides() {
+        let user = ProjectSettingsFile {
+            show_hidden_files: Some(true),
+            sidebar_width: Some(300.0),
+            keybindings: vec![KeyBindingConfig {
+                command: "show_find".to_string(),
+                key: "F".to_string(),
+                modifiers: vec!["command".to_string()],
+            }],
+        };
+        let project = ProjectSettingsFile {
+            show_hidden_files: Some(false),
+            sidebar_width: Some(260.0),
+            keybindings: vec![KeyBindingConfig {
+                command: "show_project_search".to_string(),
+                key: "F".to_string(),
+                modifiers: vec!["command".to_string(), "shift".to_string()],
+            }],
+        };
+
+        let resolved = resolve_settings(&user, &project);
+        assert!(!resolved.show_hidden_files);
+        assert_eq!(resolved.sidebar_width, 260.0);
+        assert_eq!(resolved.keybindings.len(), 2);
+    }
+
+    #[test]
+    fn rejects_invalid_keybinding_modifier() {
+        let settings = ProjectSettingsFile {
+            show_hidden_files: None,
+            sidebar_width: None,
+            keybindings: vec![KeyBindingConfig {
+                command: "show_find".to_string(),
+                key: "F".to_string(),
+                modifiers: vec!["hyper".to_string()],
+            }],
+        };
+
+        let err = validate_settings_file(&settings).unwrap_err();
+        assert!(err.contains("unsupported keybinding modifier"));
+    }
+
+    #[test]
     fn decodes_utf8_text() {
         let decoded = decode_text_bytes("中文 UTF-8".as_bytes());
         assert_eq!(decoded.text, "中文 UTF-8");
@@ -2149,6 +2434,8 @@ mod tests {
         let (encoded, _, _) = encoding_rs::GBK.encode("中文内容");
         let decoded = decode_text_bytes(encoded.as_ref());
         assert_eq!(decoded.text, "中文内容");
-        assert!(matches!(decoded.encoding, TextFileEncoding::Legacy(enc) if enc == encoding_rs::GBK));
+        assert!(
+            matches!(decoded.encoding, TextFileEncoding::Legacy(enc) if enc == encoding_rs::GBK)
+        );
     }
 }
